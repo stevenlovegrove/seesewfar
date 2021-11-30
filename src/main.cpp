@@ -37,8 +37,8 @@ void main() {
 @start fragment
 #version 120
 varying vec2 v_pos;
-uniform vec2 u_offset_scale;
 uniform vec2 u_dim;
+uniform vec3 u_color;
 uniform mat3 u_KRbaKinv;
 uniform sampler2D tex;
 
@@ -52,14 +52,17 @@ vec2 Project(vec3 p)
     return vec2(p.x/p.z, p.y/p.z);
 }
 
-void main() {
-    vec2 Pa = v_pos * u_dim;
-    vec2 Pb = Project(u_KRbaKinv * Unproject(Pa));
+vec2 Pix2Tex(vec2 p, vec2 dim)
+{
+    return (p + vec2(0.5)) / dim;
+}
 
-    vec3 color = texture2D(tex,Pb/u_dim).xyz;
-    color += vec3(u_offset_scale.x, u_offset_scale.x, u_offset_scale.x);
-    color *= u_offset_scale.y;
-    gl_FragColor = vec4(color, 1.0);
+void main() {
+    vec2 Pa = v_pos * u_dim - vec2(0.5);
+    vec2 Pb = Project(u_KRbaKinv * Unproject(Pa));
+    float I = texture2D(tex,Pix2Tex(Pb,u_dim)).x;
+//    float I = texture2D(tex,v_pos).x;
+    gl_FragColor = vec4(I*u_color, 1.0);
 }
 )Shader";
 
@@ -154,12 +157,14 @@ int main( int /*argc*/, char** /*argv*/ )
     }
 
     // load rest in parallel.
+    async::cancellation_token cancel_point;
+    std::vector<async::task<void>> loading_tasks;
     for(size_t i=1; i < image_filenames.size(); ++i) {
-        async::spawn([&,i](){
-            std::cout << image_filenames[i] << std::endl;
+        loading_tasks.push_back(async::spawn([&,i](){
+            async::interruption_point(cancel_point);
             auto channels = LoadImageAndInfo(image_filenames[i]);
             for(auto& c : channels)  to_upload.push(std::move(c));
-        });
+        }));
     }
 
     const size_t N = image_filenames.size();
@@ -209,23 +214,28 @@ int main( int /*argc*/, char** /*argv*/ )
 
     Eigen::Vector2f offset_scale(0.0f, 1.0f);
 
-    auto render_warped = [&](const Sophus::SO3d& R_ba, Eigen::Matrix3d& K, GlTexture& tex) {
+    auto render_warped = [&](const Sophus::SO3d& R_ba, const Eigen::Matrix3d& K, const Eigen::Matrix3d& Kinv, GlTexture& tex, uint8_t bayer_channel) {
         const Eigen::Vector2d dims((double)width, (double)height);
 
-        prog.Bind();
-        prog.SetUniform("u_offset_scale", offset_scale);
-        prog.SetUniform("u_KRbaKinv", (K * R_ba.matrix() * K.inverse()).cast<float>().eval() );
-        prog.SetUniform("u_dim", dims.cast<float>().eval() );
+        // BGGR
+        Eigen::Vector3f colors[] = {
+            {0.0f, 0.0f, 1.0f},
+            {0.0f, 0.5f, 0.0f},
+            {0.0f, 0.5f, 0.0f},
+            {1.0f, 0.0f, 0.0f},
+        };
 
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
+        const Eigen::Matrix3d H = K * R_ba.matrix() * Kinv;
+
+        prog.Bind();
+        prog.SetUniform("u_KRbaKinv", H.cast<float>().eval() );
+        prog.SetUniform("u_dim", dims.cast<float>().eval() );
+        prog.SetUniform("u_color", colors[bayer_channel] );
 
         tex.Bind();
         glEnable(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glDrawRect(-1,-1,1,1);
         glDisable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -243,7 +253,7 @@ int main( int /*argc*/, char** /*argv*/ )
         auto fmt = GlPixFormat::FromType<uint16_t>();
         std::shared_ptr<TextureAndInfo> t( new TextureAndInfo{
             channel.info,
-            GlTexture((GLint)channel.image.w, (GLint)channel.image.h, GL_RGBA32F, true, 0, fmt.glformat, fmt.gltype, channel.image.ptr )
+            GlTexture((GLint)channel.image.w, (GLint)channel.image.h, GL_LUMINANCE16, true, 0, fmt.glformat, fmt.gltype, channel.image.ptr )
         } );
 
         textures.push_back(t);
@@ -259,19 +269,31 @@ int main( int /*argc*/, char** /*argv*/ )
 
         const double time_s = (t->info.timestamp - start_time) / 1.0;
 
+
         const Sophus::SO3d R_ba = Sophus::SO3d::exp(time_s * axis_angle);
-        Eigen::Matrix3d K;
-        K << focal_pix, 0.0, width / 2.0,
+
+        Eigen::Matrix3d K_image;
+        K_image << focal_pix, 0.0, width / 2.0,
              0.0, focal_pix, height / 2.0,
              0.0, 0.0, 1.0;
 
-        render_warped(R_ba, K, t->tex);
+        Eigen::Matrix3d K_channel;
+        const double dx = 0.5*(t->info.bayer_channel % 2);
+        const double dy = 0.5*(t->info.bayer_channel / 2);
+        K_channel << focal_pix, 0.0, width / 2.0 + dx,
+             0.0, focal_pix, height / 2.0 + dy,
+             0.0, 0.0, 1.0;
+
+        Eigen::Matrix3d K_channel_inv = K_channel.inverse();
+
+        render_warped(R_ba, K_image, K_channel_inv, t->tex, t->info.bayer_channel);
     };
 
-    view.tex = GlTexture(width,height,GL_RGB32F);
+    const size_t view_scale = 4;
+    view.tex = GlTexture(view_scale*width,view_scale*height,GL_RGB32F);
     GlFramebuffer buffer(view.tex);
 
-    view.SetDimensions(width,height);
+    view.SetDimensions(view_scale*width,view_scale*height);
 
     size_t num_fused = 0;
 
@@ -287,7 +309,7 @@ int main( int /*argc*/, char** /*argv*/ )
             view.offset_scale.second = view.offset_scale.second * num_fused;
 
             buffer.Bind();
-            glViewport(0,0,width,height);
+            glViewport(0,0,view_scale*width,view_scale*height);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             buffer.Unbind();
 
@@ -296,13 +318,13 @@ int main( int /*argc*/, char** /*argv*/ )
             num_fused = 0;
         }
 
-        const size_t to_fuse_this_it = std::min( 5ul, to_fuse.size());
+        const size_t to_fuse_this_it = std::min( 4ul, to_fuse.size());
 
-        if(to_fuse_this_it) {
+        if(/*num_fused < 4 && */to_fuse_this_it) {
             buffer.Bind();
             glEnable(GL_BLEND);
             glBlendFunc(GL_ONE,GL_ONE);
-            glViewport(0,0,width,height);
+            glViewport(0,0,view_scale*width,view_scale*height);
 
             for(size_t i=0; i < to_fuse_this_it; ++i) {
                 render_next_tex();
@@ -321,6 +343,9 @@ int main( int /*argc*/, char** /*argv*/ )
 
         pangolin::FinishFrame();
     }
+
+    cancel_point.cancel();
+    async::when_all(loading_tasks).wait();
 
     return 0;
 }
