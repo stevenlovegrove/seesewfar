@@ -12,11 +12,15 @@
 #include "memo.hpp"
 
 #include <libraw/libraw.h>
+#include <async++.h>
 
 #include <unordered_map>
 #include <deque>
 #include <thread>
 #include <future>
+
+using namespace pangolin;
+
 
 const std::string star_shader = R"Shader(
 @start vertex
@@ -65,63 +69,50 @@ double pixel_focal_length_from_mm(double focal_length_mm, const Eigen::Vector2d&
     return focal_length_mm * pix_per_mm[0];
 }
 
-struct ImageAndInfo
+struct ChannelAndInfo
 {
-    pangolin::TypedImage image;
     long timestamp;
+    float focal_mm;
+    uint8_t bayer_channel;
+    ManagedImage<uint16_t> image;
 };
 
-ImageAndInfo LoadImageAndInfo(const std::string& filename)
+std::array<ChannelAndInfo,4> LoadImageAndInfo(const std::string& filename)
 {
-    using namespace pangolin;
-
-    LibRaw RawProcessor;
+    auto raw = std::make_unique<LibRaw>();
 
     int result;
 
-    if ((result = RawProcessor.open_file(filename.c_str())) != LIBRAW_SUCCESS)
+    if ((result = raw->open_file(filename.c_str())) != LIBRAW_SUCCESS)
     {
         throw std::runtime_error(libraw_strerror(result));
     }
 
-    if ((result = RawProcessor.unpack()) != LIBRAW_SUCCESS)
+    if ((result = raw->unpack()) != LIBRAW_SUCCESS)
     {
         throw std::runtime_error(libraw_strerror(result));
     }
 
-    const auto& S = RawProcessor.imgdata.sizes;
+    const auto& S = raw->imgdata.sizes;
 
-    ImageAndInfo ret;
-    ret.timestamp = RawProcessor.imgdata.other.timestamp;
-    ret.image.Reinitialise(S.width, S.height, PixelFormatFromString("GRAY16LE"), sizeof(uint16_t) * S.raw_width);
-    PitchedCopy((char*)ret.image.ptr, ret.image.pitch, (char*)RawProcessor.imgdata.rawdata.raw_image, sizeof(uint16_t) * S.raw_width, sizeof(uint16_t) * ret.image.w, ret.image.h);
-    return ret;
-}
-
-ImageAndInfo LoadImageAndInfo(char* buffer, size_t size_bytes)
-{
-    using namespace pangolin;
-
-    LibRaw RawProcessor;
-
-    int result;
-
-    if ((result = RawProcessor.open_buffer(buffer, size_bytes)) != LIBRAW_SUCCESS)
-    {
-        throw std::runtime_error(libraw_strerror(result));
+    std::array<ChannelAndInfo,4> ret;
+    for(size_t c=0; c < 4; ++c) {
+        ret[c].timestamp = raw->imgdata.other.timestamp;
+        ret[c].focal_mm = raw->imgdata.other.focal_len;
+        ret[c].bayer_channel = c;
+        auto& img_out = ret[c].image;
+        img_out.Reinitialise(S.width / 2, S.height / 2);
+        for(unsigned y=0; y < img_out.h; ++y) {
+            uint16_t* outp = img_out.RowPtr(y);
+            uint16_t* endp = img_out.RowPtr(y) + img_out.w;
+            uint16_t* inp = raw->imgdata.rawdata.raw_image + (c%2) + (2*y+c/2)*S.raw_width;
+            while(outp != endp) {
+                *outp = *inp;
+                inp+=2;
+                outp++;
+            }
+        }
     }
-
-    if ((result = RawProcessor.unpack()) != LIBRAW_SUCCESS)
-    {
-        throw std::runtime_error(libraw_strerror(result));
-    }
-
-    const auto& S = RawProcessor.imgdata.sizes;
-
-    ImageAndInfo ret;
-    ret.timestamp = RawProcessor.imgdata.other.timestamp;
-    ret.image.Reinitialise(S.width, S.height, PixelFormatFromString("GRAY16LE"), sizeof(uint16_t) * S.raw_width);
-    PitchedCopy((char*)ret.image.ptr, ret.image.pitch, (char*)RawProcessor.imgdata.rawdata.raw_image, sizeof(uint16_t) * S.raw_width, sizeof(uint16_t) * ret.image.w, ret.image.h);
     return ret;
 }
 
@@ -130,43 +121,64 @@ template<typename R>
   { return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready; }
 
 
-int main( int /*argc*/, char** /*argv*/ )
+std::vector<ChannelAndInfo> LoadAllImages(const std::string& path)
 {
-    LibRaw raw[11];
-    return 0;
+    std::vector<std::future<std::array<ChannelAndInfo,4>>> futures;
+    std::vector<std::string> image_filenames;
+    pangolin::FilesMatchingWildcard(path, image_filenames);
 
-    using namespace pangolin;
+    for(const auto& filename : image_filenames) {
+        std::cout << "Loading '" << filename << "'" << std::endl;
+        futures.push_back(std::async(LoadImageAndInfo,filename));
+    }
 
-    const std::string path = "/Users/stevenlovegrove/code/telescope/data/DSC*.ARW";
-    std::vector<ImageAndInfo> loaded_images;
-    loaded_images.reserve(1000);
+    std::cout << "Finalizing..." << std::endl;
 
-    {
-        std::vector<std::string> image_filenames;
-        FilesMatchingWildcard(path, image_filenames);
+    std::vector<ChannelAndInfo> loaded_images;
+    loaded_images.reserve(image_filenames.size() * 4);
 
-        for(const auto& filename : image_filenames)
+    for(auto& i : futures) {
+        auto arr = i.get();
+        auto& c = arr[0];
+//        for(auto& c : arr)
         {
-            std::cout << filename << std::endl;
-            std::string s = GetFileContents(filename);
-//            loaded_images.push_back(LoadImageAndInfo(s.data(), s.size()));
-//            loaded_images.push_back(LoadImageAndInfo(filename));
+            loaded_images.push_back(std::move(c));
         }
     }
 
-    return 0;
+    std::cout << "Done." << std::endl;
 
-    auto video = OpenVideo("debayer:[tile=rggb,method=mono]///Users/stevenlovegrove/code/telescope/data/DSC*.ARW");
-    const size_t width = video->Streams()[0].Width();
-    const size_t height = video->Streams()[0].Height();
-    const size_t pitch = video->Streams()[0].Pitch();
-    const auto pix_fmt = video->Streams()[0].PixFormat();
+    return loaded_images;
+}
 
-    auto* playback = FindFirstMatchingVideoInterface<VideoPlaybackInterface>(*video.get());
-    if(!playback) {
-        std::cerr << "Only supports playback video" << std::endl;
+/*
+void test()
+{
+    auto filenames = get_filenames();
+    for(auto f : filenames) {
+        auto r = load(f);
+
+    }
+}
+*/
+
+int main( int /*argc*/, char** /*argv*/ )
+{
+    using namespace pangolin;
+
+    const std::string path = "/Users/stevenlovegrove/code/telescope/data/DSC*.ARW";
+    std::vector<ChannelAndInfo> loaded_images = LoadAllImages(path);
+
+    if(loaded_images.size() == 0) {
+        std::cerr << "No images to load. Exiting." << std::endl;
         return -1;
     }
+
+    const size_t N = loaded_images.size();
+    const size_t width = loaded_images[0].image.w;
+    const size_t height = loaded_images[0].image.h;
+    const float focal_mm = loaded_images[0].focal_mm;
+    const auto pix_fmt = PixelFormatFromString("GRAY16LE");
 
     CreateWindowAndBind("Main",640,480);
     glEnable(GL_DEPTH_TEST);
@@ -176,10 +188,8 @@ int main( int /*argc*/, char** /*argv*/ )
     pangolin::CreatePanel("ui").SetBounds(0.0, 1.0, 0.0, Attach::Pix(UI_WIDTH));
 
     ImageView view;
-//    View view2;
     const double aspect = width / (double)height;
     view.SetAspect(aspect);
-//    view2.SetAspect(aspect);
     view.offset_scale.second = 10.0f;
 
     View container;
@@ -195,25 +205,18 @@ int main( int /*argc*/, char** /*argv*/ )
         pangolin::RegisterKeyPressCallback('1'+i, [i,&container](){ container[i].ToggleShow(); });
     }
 
-    Var<int> frame("ui.frame", 0, 0, playback->GetTotalFrames()-1);
+    Var<int> frame("ui.frame", 0, 0, N-1);
     frame.Meta().gui_changed = true;
 
-    double f = 2963.0; //video->Streams()[0].Width() / 2.0;
+    std::cout << focal_mm << std::endl;
+    std::cout << width << " x " << height << std::endl;
+    double focal_pix = pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
     Eigen::Vector3d axis_angle(2.234e-5, 0.0001174,-9.798e-5); //(0.0, 0.0, 0.0);
 
-    Var<double>::Attach("ui.f", f, width / 4.0, width * 4.0 );
+    Var<double>::Attach("ui.f", focal_pix, width / 4.0, width * 4.0 );
     Var<double>::Attach("ui.a1", axis_angle[0], -1e-4, +1e-4);
     Var<double>::Attach("ui.a2", axis_angle[1], -1e-4, +1e-4);
     Var<double>::Attach("ui.a3", axis_angle[2], -1e-5, +1e-5);
-
-    auto load_image = [&](size_t frame) {
-        playback->Seek(frame);
-        TypedImage image(width, height, pix_fmt, pitch);
-        video->GrabNext(image.ptr);
-        return image;
-    };
-
-    auto get_image = memo::memoize(load_image);
 
     Eigen::Vector2f offset_scale(0.0f, 1.0f);
 
@@ -247,7 +250,12 @@ int main( int /*argc*/, char** /*argv*/ )
         if(it != textures.end()) {
             return it->second;
         }else{
-            auto it_res = textures.emplace(std::make_pair(frame, GlTexture(get_image(frame))));
+            auto& image = loaded_images[frame].image;
+            auto fmt = GlPixFormat::FromType<uint16_t>();
+            auto it_res = textures.emplace(std::make_pair(
+                frame,
+                GlTexture((GLint)image.w, (GLint)image.h, GL_RGBA32F, true, 0, fmt.glformat, fmt.gltype, image.ptr )
+            ));
             return it_res.first->second;
         }
     };
@@ -256,8 +264,8 @@ int main( int /*argc*/, char** /*argv*/ )
     {
         const Sophus::SO3d R_ba = Sophus::SO3d::exp(frame * axis_angle);
         Eigen::Matrix3d K;
-        K << f, 0.0, width / 2.0,
-             0.0, f, height / 2.0,
+        K << focal_pix, 0.0, width / 2.0,
+             0.0, focal_pix, height / 2.0,
              0.0, 0.0, 1.0;
 
         render_warped(R_ba, K, get_tex(frame));
@@ -266,9 +274,9 @@ int main( int /*argc*/, char** /*argv*/ )
     view.tex = GlTexture(width,height,GL_RGB32F);
     GlFramebuffer buffer(view.tex);
 
-//    const float h_fov_rad = 2.0*atan2(width/2.0, f);
-//    std::cout <<  "Horizontal field of view: " << 180.0*h_fov_rad/M_PI << std::endl;
-//    std::cout << pixel_focal_length_from_mm(55.0, {36,24}, {(double)width,(double)height}) << std::endl;
+    const float h_fov_rad = 2.0*atan2(width/2.0, focal_pix);
+    std::cout <<  "Horizontal field of view: " << 180.0*h_fov_rad/M_PI << std::endl;
+    std::cout << pixel_focal_length_from_mm(55.0, {36,24}, {(double)width,(double)height}) << std::endl;
 
     size_t to_fuse = 0;
 
@@ -289,7 +297,7 @@ int main( int /*argc*/, char** /*argv*/ )
             buffer.Unbind();
         }
 
-        if(to_fuse < playback->GetTotalFrames()) {
+        if(to_fuse < N) {
             buffer.Bind();
             glEnable(GL_BLEND);
             glBlendFunc(GL_ONE,GL_ONE);
