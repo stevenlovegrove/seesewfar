@@ -9,7 +9,6 @@
 #include <pangolin/utils/file_utils.h>
 
 #include <sophus/so3.hpp>
-#include "memo.hpp"
 
 #include <libraw/libraw.h>
 #include <async++.h>
@@ -18,9 +17,11 @@
 #include <deque>
 #include <thread>
 #include <future>
+#include <algorithm>
+#include <queue>
+#include <cmath>
 
 using namespace pangolin;
-
 
 const std::string star_shader = R"Shader(
 @start vertex
@@ -69,12 +70,23 @@ double pixel_focal_length_from_mm(double focal_length_mm, const Eigen::Vector2d&
     return focal_length_mm * pix_per_mm[0];
 }
 
-struct ChannelAndInfo
+struct ImageInfo
 {
     long timestamp;
     float focal_mm;
     uint8_t bayer_channel;
+};
+
+struct ChannelAndInfo
+{
+    ImageInfo info;
     ManagedImage<uint16_t> image;
+};
+
+struct TextureAndInfo
+{
+    ImageInfo info;
+    GlTexture tex;
 };
 
 std::array<ChannelAndInfo,4> LoadImageAndInfo(const std::string& filename)
@@ -97,9 +109,9 @@ std::array<ChannelAndInfo,4> LoadImageAndInfo(const std::string& filename)
 
     std::array<ChannelAndInfo,4> ret;
     for(size_t c=0; c < 4; ++c) {
-        ret[c].timestamp = raw->imgdata.other.timestamp;
-        ret[c].focal_mm = raw->imgdata.other.focal_len;
-        ret[c].bayer_channel = c;
+        ret[c].info.timestamp = raw->imgdata.other.timestamp;
+        ret[c].info.focal_mm = raw->imgdata.other.focal_len;
+        ret[c].info.bayer_channel = c;
         auto& img_out = ret[c].image;
         img_out.Reinitialise(S.width / 2, S.height / 2);
         for(unsigned y=0; y < img_out.h; ++y) {
@@ -116,68 +128,45 @@ std::array<ChannelAndInfo,4> LoadImageAndInfo(const std::string& filename)
     return ret;
 }
 
-template<typename R>
-  bool is_ready(std::future<R> const& f)
-  { return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready; }
-
-
-std::vector<ChannelAndInfo> LoadAllImages(const std::string& path)
+int main( int /*argc*/, char** /*argv*/ )
 {
-    std::vector<std::future<std::array<ChannelAndInfo,4>>> futures;
+    const std::string path = "/Users/stevenlovegrove/code/telescope/data/DSC*.ARW";
     std::vector<std::string> image_filenames;
-    pangolin::FilesMatchingWildcard(path, image_filenames);
-
-    for(const auto& filename : image_filenames) {
-        std::cout << "Loading '" << filename << "'" << std::endl;
-        futures.push_back(std::async(LoadImageAndInfo,filename));
-    }
-
-    std::cout << "Finalizing..." << std::endl;
-
-    std::vector<ChannelAndInfo> loaded_images;
-    loaded_images.reserve(image_filenames.size() * 4);
-
-    for(auto& i : futures) {
-        auto arr = i.get();
-        auto& c = arr[0];
-//        for(auto& c : arr)
-        {
-            loaded_images.push_back(std::move(c));
+    {
+        pangolin::FilesMatchingWildcard(path, image_filenames);
+        if(image_filenames.size() == 0) {
+            std::cerr << "No images to load. Exiting." << std::endl;
+            return -1;
         }
     }
 
-    std::cout << "Done." << std::endl;
+    std::queue<ChannelAndInfo> to_upload;
 
-    return loaded_images;
-}
+    // load first serially to ensure order
+    {
+        auto channels = LoadImageAndInfo(image_filenames[0]);
+        for(auto& c : channels)  to_upload.push(std::move(c));
 
-/*
-void test()
-{
-    auto filenames = get_filenames();
-    for(auto f : filenames) {
-        auto r = load(f);
-
-    }
-}
-*/
-
-int main( int /*argc*/, char** /*argv*/ )
-{
-    using namespace pangolin;
-
-    const std::string path = "/Users/stevenlovegrove/code/telescope/data/DSC*.ARW";
-    std::vector<ChannelAndInfo> loaded_images = LoadAllImages(path);
-
-    if(loaded_images.size() == 0) {
-        std::cerr << "No images to load. Exiting." << std::endl;
-        return -1;
+        // shuffle the rest for less bias incremental sampling
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::shuffle(image_filenames.begin()+1, image_filenames.end(), g);
     }
 
-    const size_t N = loaded_images.size();
-    const size_t width = loaded_images[0].image.w;
-    const size_t height = loaded_images[0].image.h;
-    const float focal_mm = loaded_images[0].focal_mm;
+    // load rest in parallel.
+    for(size_t i=1; i < image_filenames.size(); ++i) {
+        async::spawn([&,i](){
+            std::cout << image_filenames[i] << std::endl;
+            auto channels = LoadImageAndInfo(image_filenames[i]);
+            for(auto& c : channels)  to_upload.push(std::move(c));
+        });
+    }
+
+    const size_t N = image_filenames.size();
+    const size_t width = to_upload.front().image.w;
+    const size_t height = to_upload.front().image.h;
+    const unsigned long start_time = to_upload.front().info.timestamp;
+    const float focal_mm = to_upload.front().info.focal_mm;
     const auto pix_fmt = PixelFormatFromString("GRAY16LE");
 
     CreateWindowAndBind("Main",640,480);
@@ -211,7 +200,7 @@ int main( int /*argc*/, char** /*argv*/ )
     std::cout << focal_mm << std::endl;
     std::cout << width << " x " << height << std::endl;
     double focal_pix = pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
-    Eigen::Vector3d axis_angle(2.234e-5, 0.0001174,-9.798e-5); //(0.0, 0.0, 0.0);
+    Eigen::Vector3d axis_angle(1.064e-5, 5.311e-5,-6.526e-5); //(0.0, 0.0, 0.0);
 
     Var<double>::Attach("ui.f", focal_pix, width / 4.0, width * 4.0 );
     Var<double>::Attach("ui.a1", axis_angle[0], -1e-4, +1e-4);
@@ -243,74 +232,91 @@ int main( int /*argc*/, char** /*argv*/ )
         prog.Unbind();
     };
 
-    std::unordered_map<size_t, GlTexture> textures;
+    std::vector<std::shared_ptr<TextureAndInfo>> textures;
+    std::queue<std::shared_ptr<TextureAndInfo>> to_fuse;
 
-    auto get_tex = [&](size_t frame) -> GlTexture& {
-        auto it = textures.find(frame);
-        if(it != textures.end()) {
-            return it->second;
-        }else{
-            auto& image = loaded_images[frame].image;
-            auto fmt = GlPixFormat::FromType<uint16_t>();
-            auto it_res = textures.emplace(std::make_pair(
-                frame,
-                GlTexture((GLint)image.w, (GLint)image.h, GL_RGBA32F, true, 0, fmt.glformat, fmt.gltype, image.ptr )
-            ));
-            return it_res.first->second;
-        }
+    auto upload_next_texture = [&](){
+        if(to_upload.empty()) return;
+
+        auto channel = std::move(to_upload.front());
+        to_upload.pop();
+        auto fmt = GlPixFormat::FromType<uint16_t>();
+        std::shared_ptr<TextureAndInfo> t( new TextureAndInfo{
+            channel.info,
+            GlTexture((GLint)channel.image.w, (GLint)channel.image.h, GL_RGBA32F, true, 0, fmt.glformat, fmt.gltype, channel.image.ptr )
+        } );
+
+        textures.push_back(t);
+        to_fuse.push(t);
     };
 
-    auto render_frame = [&](size_t frame)
+    auto render_next_tex = [&]()
     {
-        const Sophus::SO3d R_ba = Sophus::SO3d::exp(frame * axis_angle);
+        if(to_fuse.empty()) return;
+
+        auto t = std::move(to_fuse.front());
+        to_fuse.pop();
+
+        const double time_s = (t->info.timestamp - start_time) / 1.0;
+
+        const Sophus::SO3d R_ba = Sophus::SO3d::exp(time_s * axis_angle);
         Eigen::Matrix3d K;
         K << focal_pix, 0.0, width / 2.0,
              0.0, focal_pix, height / 2.0,
              0.0, 0.0, 1.0;
 
-        render_warped(R_ba, K, get_tex(frame));
+        render_warped(R_ba, K, t->tex);
     };
 
     view.tex = GlTexture(width,height,GL_RGB32F);
     GlFramebuffer buffer(view.tex);
 
-    const float h_fov_rad = 2.0*atan2(width/2.0, focal_pix);
-    std::cout <<  "Horizontal field of view: " << 180.0*h_fov_rad/M_PI << std::endl;
-    std::cout << pixel_focal_length_from_mm(55.0, {36,24}, {(double)width,(double)height}) << std::endl;
-
-    size_t to_fuse = 0;
-
     view.SetDimensions(width,height);
+
+    size_t num_fused = 0;
 
     while( !pangolin::ShouldQuit() )
     {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        if(GuiVarHasChanged()) {
-            view.offset_scale.first = view.offset_scale.first / to_fuse;
-            view.offset_scale.second = view.offset_scale.second * to_fuse;
+        for(int i=0; i < 4; ++i) upload_next_texture();
 
-            to_fuse = 0;
+        if(GuiVarHasChanged()) {
+            // Restart
+            view.offset_scale.first = view.offset_scale.first / num_fused;
+            view.offset_scale.second = view.offset_scale.second * num_fused;
+
             buffer.Bind();
             glViewport(0,0,width,height);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             buffer.Unbind();
+
+            while(!to_fuse.empty()) to_fuse.pop();
+            for(auto& t : textures) to_fuse.push(t);
+            num_fused = 0;
         }
 
-        if(to_fuse < N) {
+        const size_t to_fuse_this_it = std::min( 5ul, to_fuse.size());
+
+        if(to_fuse_this_it) {
             buffer.Bind();
             glEnable(GL_BLEND);
             glBlendFunc(GL_ONE,GL_ONE);
             glViewport(0,0,width,height);
-            render_frame(to_fuse);
+
+            for(size_t i=0; i < to_fuse_this_it; ++i) {
+                render_next_tex();
+
+                if(num_fused) {
+                    view.offset_scale.first = view.offset_scale.first / num_fused * (num_fused+1);
+                    view.offset_scale.second = view.offset_scale.second * num_fused / (num_fused+1);
+                }
+                ++num_fused;
+            }
+
             glDisable(GL_BLEND);
             buffer.Unbind();
 
-            if(to_fuse) {
-                view.offset_scale.first = view.offset_scale.first / to_fuse * (to_fuse+1);
-                view.offset_scale.second = view.offset_scale.second * to_fuse / (to_fuse+1);
-            }
-            ++to_fuse;
         }
 
         pangolin::FinishFrame();
