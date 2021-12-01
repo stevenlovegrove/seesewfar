@@ -11,7 +11,6 @@
 
 #include <sophus/so3.hpp>
 
-#include <libraw/libraw.h>
 #include <async++.h>
 
 #include <unordered_map>
@@ -22,149 +21,12 @@
 #include <queue>
 #include <cmath>
 
+#include "star_shader.h"
+#include "image_loading.h"
+#include "utils.h"
+#include "vignette_histogram.h"
+
 using namespace pangolin;
-
-const std::string star_shader = R"Shader(
-@start vertex
-#version 120
-attribute vec3 a_position;
-varying vec2 v_pos;
-
-void main() {
-    gl_Position = vec4(a_position, 1.0);
-    v_pos = a_position.xy;
-}
-
-@start fragment
-#version 120
-varying vec2 v_pos;
-uniform vec2 u_dim;
-uniform vec3 u_color;
-uniform mat3 u_KRbaKinv;
-uniform float u_gamma;
-uniform float u_vig_scale;
-uniform sampler2D tex;
-
-vec3 Unproject(vec2 p)
-{
-    return vec3(p, 1.0);
-}
-
-vec2 Project(vec3 p)
-{
-    return vec2(p.x/p.z, p.y/p.z);
-}
-
-vec2 Pix2Tex(vec2 p, vec2 dim)
-{
-    return (p + vec2(0.5)) / dim;
-}
-
-void main() {
-    vec2 Pa = (v_pos * vec2(0.5,-0.5) + vec2(0.5,0.5)) * u_dim - vec2(0.5);
-    vec2 Pb = Project(u_KRbaKinv * Unproject(Pa));
-    float x = texture2D(tex,Pix2Tex(Pb,u_dim)).x / 65536.0;
-//    float theta = u_vig_scale*length(v_pos);
-//    float cth = cos(theta);
-//    float A = 1.0 / (cth*cth);
-    float I = pow(x, u_gamma);
-    gl_FragColor = vec4(I*u_color, 1.0);
-}
-)Shader";
-
-double pixel_focal_length_from_mm(double focal_length_mm, const Eigen::Vector2d& sensor_dim_mm, const Eigen::Vector2d& image_dim_pix)
-{
-    const Eigen::Vector2d pix_per_mm = image_dim_pix.array() / sensor_dim_mm.array();
-    std::cout << pix_per_mm.transpose() << std::endl;
-    return focal_length_mm * pix_per_mm[0];
-}
-
-struct ImageInfo
-{
-    long timestamp;
-    float focal_mm;
-    uint8_t bayer_channel;
-};
-
-struct ChannelAndInfo
-{
-    ImageInfo info;
-    ManagedImage<uint16_t> image;
-};
-
-struct TextureAndInfo
-{
-    ImageInfo info;
-    GlTexture tex;
-};
-
-std::array<ChannelAndInfo,4> LoadImageAndInfo(const std::string& filename)
-{
-    auto raw = std::make_unique<LibRaw>();
-
-    int result;
-
-    if ((result = raw->open_file(filename.c_str())) != LIBRAW_SUCCESS)
-    {
-        throw std::runtime_error(libraw_strerror(result));
-    }
-
-    if ((result = raw->unpack()) != LIBRAW_SUCCESS)
-    {
-        throw std::runtime_error(libraw_strerror(result));
-    }
-
-    const auto& S = raw->imgdata.sizes;
-
-    std::array<ChannelAndInfo,4> ret;
-    for(size_t c=0; c < 4; ++c) {
-        ret[c].info.timestamp = raw->imgdata.other.timestamp;
-        ret[c].info.focal_mm = raw->imgdata.other.focal_len;
-        ret[c].info.bayer_channel = c;
-        auto& img_out = ret[c].image;
-        img_out.Reinitialise(S.width / 2, S.height / 2);
-        for(unsigned y=0; y < img_out.h; ++y) {
-            uint16_t* outp = img_out.RowPtr(y);
-            uint16_t* endp = img_out.RowPtr(y) + img_out.w;
-            uint16_t* inp = raw->imgdata.rawdata.raw_image + (c%2) + (2*y+c/2)*S.raw_width;
-            while(outp != endp) {
-                *outp = *inp;
-                inp+=2;
-                outp++;
-            }
-        }
-    }
-    return ret;
-}
-
-Eigen::ArrayXf PolarHistogram(const Image<uint16_t>& image, const Eigen::Vector2f& center, size_t num_bins, size_t num_samples)
-{
-    Eigen::ArrayXf sum = Eigen::ArrayXf::Zero(num_bins);
-    Eigen::ArrayXi num = Eigen::ArrayXi::Zero(num_bins);
-
-    static std::default_random_engine gen;
-    std::uniform_int_distribution<size_t> dist_w(0, image.w);
-    std::uniform_int_distribution<size_t> dist_h(0, image.h);
-
-    for(size_t i=0; i < num_samples; ++i) {
-        const Eigen::Vector2i p{dist_w(gen), dist_h(gen)};
-        const uint16_t v = image(p);
-        const float rad_pix = (p.cast<float>() - center).norm();
-        const int rad_pix_i = std::round(rad_pix);
-        if(rad_pix_i < num_bins) {
-            sum[rad_pix_i] += v;
-            ++num[rad_pix_i];
-        }
-    }
-
-//    Eigen::ArrayXf hist = Eigen::ArrayXf::Zero(num_bins);
-
-//    for(size_t i=0; i < num_bins; ++i) {
-//        hist[i] = num[i] > 0 ? sum[i]/num[i] : 0.0f;
-//    }
-
-    return sum / num.cast<float>();
-}
 
 // TODO:
 // * Vignette
