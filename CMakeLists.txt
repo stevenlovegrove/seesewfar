@@ -10,7 +10,7 @@ find_package(Pangolin 0.6 REQUIRED)
 find_package(Sophus REQUIRED)
 
 add_executable(stitch src/main.cpp)
-target_link_libraries(stitch pango_display pango_video Sophus::Sophus)
+target_link_libraries(stitch pango_display pango_video pango_plot Sophus::Sophus)
 
 set(ENABLE_OPENMP false)
 set(LIBRAW_PATH "${CMAKE_CURRENT_SOURCE_DIR}/LibRaw/")

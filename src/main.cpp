@@ -7,6 +7,7 @@
 #include <pangolin/var/var.h>
 #include <pangolin/video/video.h>
 #include <pangolin/utils/file_utils.h>
+#include <pangolin/plot/plotter.h>
 
 #include <sophus/so3.hpp>
 
@@ -31,7 +32,7 @@ varying vec2 v_pos;
 
 void main() {
     gl_Position = vec4(a_position, 1.0);
-    v_pos = a_position.xy * vec2(0.5,-0.5) + vec2(0.5,0.5);
+    v_pos = a_position.xy;
 }
 
 @start fragment
@@ -40,6 +41,8 @@ varying vec2 v_pos;
 uniform vec2 u_dim;
 uniform vec3 u_color;
 uniform mat3 u_KRbaKinv;
+uniform float u_gamma;
+uniform float u_vig_scale;
 uniform sampler2D tex;
 
 vec3 Unproject(vec2 p)
@@ -58,10 +61,13 @@ vec2 Pix2Tex(vec2 p, vec2 dim)
 }
 
 void main() {
-    vec2 Pa = v_pos * u_dim - vec2(0.5);
+    vec2 Pa = (v_pos * vec2(0.5,-0.5) + vec2(0.5,0.5)) * u_dim - vec2(0.5);
     vec2 Pb = Project(u_KRbaKinv * Unproject(Pa));
-    float I = texture2D(tex,Pix2Tex(Pb,u_dim)).x;
-//    float I = texture2D(tex,v_pos).x;
+    float x = texture2D(tex,Pix2Tex(Pb,u_dim)).x / 65536.0;
+//    float theta = u_vig_scale*length(v_pos);
+//    float cth = cos(theta);
+//    float A = 1.0 / (cth*cth);
+    float I = pow(x, u_gamma);
     gl_FragColor = vec4(I*u_color, 1.0);
 }
 )Shader";
@@ -131,6 +137,43 @@ std::array<ChannelAndInfo,4> LoadImageAndInfo(const std::string& filename)
     return ret;
 }
 
+Eigen::ArrayXf PolarHistogram(const Image<uint16_t>& image, const Eigen::Vector2f& center, size_t num_bins, size_t num_samples)
+{
+    Eigen::ArrayXf sum = Eigen::ArrayXf::Zero(num_bins);
+    Eigen::ArrayXi num = Eigen::ArrayXi::Zero(num_bins);
+
+    static std::default_random_engine gen;
+    std::uniform_int_distribution<size_t> dist_w(0, image.w);
+    std::uniform_int_distribution<size_t> dist_h(0, image.h);
+
+    for(size_t i=0; i < num_samples; ++i) {
+        const Eigen::Vector2i p{dist_w(gen), dist_h(gen)};
+        const uint16_t v = image(p);
+        const float rad_pix = (p.cast<float>() - center).norm();
+        const int rad_pix_i = std::round(rad_pix);
+        if(rad_pix_i < num_bins) {
+            sum[rad_pix_i] += v;
+            ++num[rad_pix_i];
+        }
+    }
+
+//    Eigen::ArrayXf hist = Eigen::ArrayXf::Zero(num_bins);
+
+//    for(size_t i=0; i < num_bins; ++i) {
+//        hist[i] = num[i] > 0 ? sum[i]/num[i] : 0.0f;
+//    }
+
+    return sum / num.cast<float>();
+}
+
+// TODO:
+// * Vignette
+// * color balance
+// * HDR (start with gamma)
+// * auto tracking.
+// * Align to star map
+// * dynamic resolution based on view window?
+
 int main( int /*argc*/, char** /*argv*/ )
 {
     const std::string path = "/Users/stevenlovegrove/code/telescope/data/DSC*.ARW";
@@ -156,23 +199,31 @@ int main( int /*argc*/, char** /*argv*/ )
         std::shuffle(image_filenames.begin()+1, image_filenames.end(), g);
     }
 
+    const size_t N = image_filenames.size();
+    const size_t width = to_upload.front().image.w;
+    const size_t height = to_upload.front().image.h;
+    const Eigen::Vector2d dims((double)width, (double)height);
+    const unsigned long start_time = to_upload.front().info.timestamp;
+    const float focal_mm = to_upload.front().info.focal_mm;
+    const auto pix_fmt = PixelFormatFromString("GRAY16LE");
+
     // load rest in parallel.
     async::cancellation_token cancel_point;
     std::vector<async::task<void>> loading_tasks;
+    const size_t hist_bins = 2000;
+    Eigen::ArrayXXf histogram = Eigen::ArrayXXf::Zero(4,hist_bins);
+
     for(size_t i=1; i < image_filenames.size(); ++i) {
         loading_tasks.push_back(async::spawn([&,i](){
             async::interruption_point(cancel_point);
             auto channels = LoadImageAndInfo(image_filenames[i]);
+            for(int c=0; c < 4; ++c) {
+                const Eigen::ArrayXf hist_c = PolarHistogram(channels[c].image, dims.cast<float>()/2.0f, hist_bins, 100000);
+                histogram.row(c) += hist_c;
+            }
             for(auto& c : channels)  to_upload.push(std::move(c));
         }));
     }
-
-    const size_t N = image_filenames.size();
-    const size_t width = to_upload.front().image.w;
-    const size_t height = to_upload.front().image.h;
-    const unsigned long start_time = to_upload.front().info.timestamp;
-    const float focal_mm = to_upload.front().info.focal_mm;
-    const auto pix_fmt = PixelFormatFromString("GRAY16LE");
 
     CreateWindowAndBind("Main",640,480);
     glEnable(GL_DEPTH_TEST);
@@ -180,6 +231,8 @@ int main( int /*argc*/, char** /*argv*/ )
 
     const int UI_WIDTH = 20* default_font().MaxWidth();
     pangolin::CreatePanel("ui").SetBounds(0.0, 1.0, 0.0, Attach::Pix(UI_WIDTH));
+    DataLog log;
+    Plotter plot(&log);
 
     ImageView view;
     const double aspect = width / (double)height;
@@ -189,7 +242,8 @@ int main( int /*argc*/, char** /*argv*/ )
     View container;
     DisplayBase().AddDisplay(container);
     container.SetBounds(0.0, 1.0, Attach::Pix(UI_WIDTH), 1.0).SetLayout(LayoutEqual);
-    container.AddDisplay(view)/*.AddDisplay(view2)*/.SetHandler(new Handler());
+    container.SetHandler(new Handler());
+    container.AddDisplay(view).AddDisplay(plot);
 
     pangolin::GlSlProgram prog;
     prog.AddShader( pangolin::GlSlAnnotatedShader, star_shader );
@@ -204,25 +258,34 @@ int main( int /*argc*/, char** /*argv*/ )
 
     std::cout << focal_mm << std::endl;
     std::cout << width << " x " << height << std::endl;
-    double focal_pix = pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
-    Eigen::Vector3d axis_angle(1.064e-5, 5.311e-5,-6.526e-5); //(0.0, 0.0, 0.0);
+    double focal_pix = 3291.0; //pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
+    Eigen::Vector3d axis_angle(1.064e-5, 5.279e-5,-4.417e-5); //(0.0, 0.0, 0.0);
+    float green_fac = 1.0;
+    float red_fac = 1.0;
+    float blue_fac = 1.0;
+    float gamma = 1.0;
+    float vig_scale = 1.0;
+
 
     Var<double>::Attach("ui.f", focal_pix, width / 4.0, width * 4.0 );
     Var<double>::Attach("ui.a1", axis_angle[0], -1e-4, +1e-4);
     Var<double>::Attach("ui.a2", axis_angle[1], -1e-4, +1e-4);
     Var<double>::Attach("ui.a3", axis_angle[2], -1e-5, +1e-5);
+    Var<float>::Attach("ui.green_fac", green_fac, 0.9, 1.0);
+    Var<float>::Attach("ui.red_fac", red_fac, 0.9, 1.0);
+    Var<float>::Attach("ui.blue_fac", blue_fac, 0.9, 1.0);
+    Var<float>::Attach("ui.gamma", gamma, 0.5, 1.5);
+    Var<float>::Attach("ui.vig_scale", vig_scale, 0.5, 1.5);
 
     Eigen::Vector2f offset_scale(0.0f, 1.0f);
 
     auto render_warped = [&](const Sophus::SO3d& R_ba, const Eigen::Matrix3d& K, const Eigen::Matrix3d& Kinv, GlTexture& tex, uint8_t bayer_channel) {
-        const Eigen::Vector2d dims((double)width, (double)height);
-
         // BGGR
         Eigen::Vector3f colors[] = {
-            {0.0f, 0.0f, 1.0f},
-            {0.0f, 0.5f, 0.0f},
-            {0.0f, 0.5f, 0.0f},
-            {1.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, blue_fac},
+            {0.0f, green_fac/2.0f, 0.0f},
+            {0.0f, green_fac/2.0f, 0.0f},
+            {red_fac, 0.0f, 0.0f},
         };
 
         const Eigen::Matrix3d H = K * R_ba.matrix() * Kinv;
@@ -231,6 +294,8 @@ int main( int /*argc*/, char** /*argv*/ )
         prog.SetUniform("u_KRbaKinv", H.cast<float>().eval() );
         prog.SetUniform("u_dim", dims.cast<float>().eval() );
         prog.SetUniform("u_color", colors[bayer_channel] );
+        prog.SetUniform("u_gamma", gamma );
+        prog.SetUniform("u_vig_scale", vig_scale );
 
         tex.Bind();
         glEnable(GL_TEXTURE_2D);
@@ -300,6 +365,9 @@ int main( int /*argc*/, char** /*argv*/ )
     while( !pangolin::ShouldQuit() )
     {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+        log.Clear();
+        log.Log(4,histogram.data(),histogram.cols());
 
         for(int i=0; i < 4; ++i) upload_next_texture();
 
