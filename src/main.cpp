@@ -25,6 +25,7 @@
 #include "image_loading.h"
 #include "utils.h"
 #include "vignette_histogram.h"
+#include "bspline.h"
 
 using namespace pangolin;
 
