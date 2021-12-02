@@ -76,7 +76,7 @@ int main( int /*argc*/, char** /*argv*/ )
     // load rest in parallel.
     async::cancellation_token cancel_point;
     std::vector<async::task<void>> loading_tasks;
-    const size_t hist_bins = 1200;
+    const size_t hist_bins = 1000;
 
     PolarHistogram histogram[4] = { {hist_bins}, {hist_bins}, {hist_bins}, {hist_bins} };
 
@@ -112,7 +112,7 @@ int main( int /*argc*/, char** /*argv*/ )
     container.AddDisplay(view).AddDisplay(plot);
 
     pangolin::GlSlProgram prog;
-    prog.AddShader( pangolin::GlSlAnnotatedShader, star_shader );
+    prog.AddShader( pangolin::GlSlAnnotatedShader, star_shader, {{"NUM_CP","5"}} );
     prog.Link();
 
     for(size_t i=0; i < container.NumChildren(); ++i) {
@@ -139,9 +139,14 @@ int main( int /*argc*/, char** /*argv*/ )
     Var<float>::Attach("ui.red_fac", red_fac, 0.5, 1.0);
     Var<float>::Attach("ui.blue_fac", blue_fac, 0.5, 1.0);
     Var<float>::Attach("ui.gamma", gamma, 0.1, 1.0);
-    Var<float>::Attach("ui.vig_scale", vig_scale, 0.5, 1.5);
 
     Eigen::Vector2f offset_scale(0.0f, 1.0f);
+
+    constexpr size_t spline_K = 3;
+    const double control_point_interval = 400.0;
+    const size_t num_control_points = int(hist_bins/control_point_interval) + spline_K;
+    Eigen::MatrixXd control_points(4,num_control_points);
+    control_points.setConstant(1.0);
 
     auto render_warped = [&](const Sophus::SO3d& R_ba, const Eigen::Matrix3d& K, const Eigen::Matrix3d& Kinv, GlTexture& tex, uint8_t bayer_channel) {
         // BGGR
@@ -159,7 +164,9 @@ int main( int /*argc*/, char** /*argv*/ )
         prog.SetUniform("u_dim", dims.cast<float>().eval() );
         prog.SetUniform("u_color", colors[bayer_channel] );
         prog.SetUniform("u_gamma", gamma );
-        prog.SetUniform("u_vig_scale", vig_scale );
+        prog.SetUniform("u_spline_interval", (float)control_point_interval );
+        glUniform1fv( prog.GetUniformHandle("u_spline_control_points"), num_control_points, control_points.row(bayer_channel).cast<float>().eval().data() );
+        prog.SetUniform("u_spline_matrix", SplineConstants<double,spline_K>::cardinal_matrix().cast<float>().eval() );
 
         tex.Bind();
         glEnable(GL_TEXTURE_2D);
@@ -231,27 +238,22 @@ int main( int /*argc*/, char** /*argv*/ )
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         {
-            Eigen::Matrix<float,5,Eigen::Dynamic> data_to_plot(5,hist_bins);
+            Eigen::Matrix<float,8,Eigen::Dynamic> data_to_plot(8,hist_bins);
 
             for(size_t c=0; c < 4; ++c) {
                 data_to_plot.row(c) = histogram[c].sum / histogram[c].num.cast<float>();
             }
 
             // fit spline
-            Eigen::Matrix<double,1,Eigen::Dynamic> rad(1, hist_bins);
-            for(size_t i=0; i < hist_bins; ++i) rad[i] = double(i);
+            const Eigen::Matrix<double,1,Eigen::Dynamic> rad = Eigen::VectorXd::LinSpaced(hist_bins, 0.0, double(hist_bins));
 
-            const size_t K = 3;
-            const double control_point_interval = 600.0;
-            const size_t num_control_points = int(hist_bins/control_point_interval) + K;
-            std::cout << "num_control_points: " << num_control_points << std::endl;
-            const Eigen::MatrixXd control_points = fit_cardinal_basis_spline<double,K,double>(
-                num_control_points, control_point_interval, rad, data_to_plot.row(0).cast<double>()
+            control_points = fit_cardinal_basis_spline<double,spline_K,double>(
+                num_control_points, control_point_interval, rad, data_to_plot.topRows<4>().cast<double>()
             );
-            const Eigen::MatrixXd samples = eval_cardinal_basis_spline<double,K,double>(
+            const Eigen::MatrixXd samples = eval_cardinal_basis_spline<double,spline_K,double>(
                 control_point_interval, control_points, rad
             );
-            data_to_plot.row(4) = samples.cast<float>();
+            data_to_plot.bottomRows<4>() = samples.cast<float>();
 
             log.Clear();
             log.Log(data_to_plot.rows(), data_to_plot.data(), data_to_plot.cols());
