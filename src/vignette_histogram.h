@@ -5,10 +5,29 @@
 #include <pangolin/image/image.h>
 #include <stdint.h>
 
-Eigen::ArrayXf PolarHistogram(const pangolin::Image<uint16_t>& image, const Eigen::Vector2f& center, size_t num_bins, size_t num_samples)
+struct PolarHistogram
 {
-    Eigen::ArrayXf sum = Eigen::ArrayXf::Zero(num_bins);
-    Eigen::ArrayXi num = Eigen::ArrayXi::Zero(num_bins);
+    PolarHistogram(size_t num_bins)
+        : sum(Eigen::ArrayXf::Zero(num_bins)),
+          num(Eigen::ArrayXi::Zero(num_bins))
+    {
+
+    }
+
+    void operator+=(const PolarHistogram& other)
+    {
+        assert(sum.size() == other.sum.size());
+        sum += other.sum;
+        num += other.num;
+    }
+
+    Eigen::ArrayXf sum;
+    Eigen::ArrayXi num;
+};
+
+PolarHistogram ComputePolarHistogram(const pangolin::Image<uint16_t>& image, const Eigen::Vector2f& center, size_t num_bins, size_t num_samples)
+{
+    PolarHistogram hist(num_bins);
 
     static std::default_random_engine gen;
     std::uniform_int_distribution<size_t> dist_w(0, image.w);
@@ -20,9 +39,9 @@ Eigen::ArrayXf PolarHistogram(const pangolin::Image<uint16_t>& image, const Eige
         const float rad_pix = (p.cast<float>() - center).norm();
         const int rad_pix_i = std::round(rad_pix);
         if(rad_pix_i < num_bins) {
-            sum[rad_pix_i] += v;
-            ++num[rad_pix_i];
+            hist.sum[rad_pix_i] += v;
+            ++hist.num[rad_pix_i];
         }
     }
-    return sum / num.cast<float>();
+    return hist;
 }

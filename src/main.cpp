@@ -67,22 +67,22 @@ int main( int /*argc*/, char** /*argv*/ )
     const size_t height = to_upload.front().image.h;
     const Eigen::Vector2d dims((double)width, (double)height);
     const unsigned long start_time = to_upload.front().info.timestamp;
-    const float focal_mm = to_upload.front().info.focal_mm;
+//    const float focal_mm = to_upload.front().info.focal_mm;
     const auto pix_fmt = PixelFormatFromString("GRAY16LE");
 
     // load rest in parallel.
     async::cancellation_token cancel_point;
     std::vector<async::task<void>> loading_tasks;
     const size_t hist_bins = 2000;
-    Eigen::ArrayXXf histogram = Eigen::ArrayXXf::Zero(4,hist_bins);
+
+    PolarHistogram histogram[4] = { {hist_bins}, {hist_bins}, {hist_bins}, {hist_bins} };
 
     for(size_t i=1; i < image_filenames.size(); ++i) {
         loading_tasks.push_back(async::spawn([&,i](){
             async::interruption_point(cancel_point);
             auto channels = LoadImageAndInfo(image_filenames[i]);
             for(int c=0; c < 4; ++c) {
-                const Eigen::ArrayXf hist_c = PolarHistogram(channels[c].image, dims.cast<float>()/2.0f, hist_bins, 100000);
-                histogram.row(c) += hist_c;
+                histogram[c] += ComputePolarHistogram(channels[c].image, dims.cast<float>()/2.0f, hist_bins, 100000);
             }
             for(auto& c : channels)  to_upload.push(std::move(c));
         }));
@@ -119,8 +119,6 @@ int main( int /*argc*/, char** /*argv*/ )
     Var<int> frame("ui.frame", 0, 0, N-1);
     frame.Meta().gui_changed = true;
 
-    std::cout << focal_mm << std::endl;
-    std::cout << width << " x " << height << std::endl;
     double focal_pix = 3291.0; //pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
     Eigen::Vector3d axis_angle(1.064e-5, 5.279e-5,-4.417e-5); //(0.0, 0.0, 0.0);
     float green_fac = 1.0;
@@ -134,10 +132,10 @@ int main( int /*argc*/, char** /*argv*/ )
     Var<double>::Attach("ui.a1", axis_angle[0], -1e-4, +1e-4);
     Var<double>::Attach("ui.a2", axis_angle[1], -1e-4, +1e-4);
     Var<double>::Attach("ui.a3", axis_angle[2], -1e-5, +1e-5);
-    Var<float>::Attach("ui.green_fac", green_fac, 0.9, 1.0);
-    Var<float>::Attach("ui.red_fac", red_fac, 0.9, 1.0);
-    Var<float>::Attach("ui.blue_fac", blue_fac, 0.9, 1.0);
-    Var<float>::Attach("ui.gamma", gamma, 0.5, 1.5);
+    Var<float>::Attach("ui.green_fac", green_fac, 0.5, 1.0);
+    Var<float>::Attach("ui.red_fac", red_fac, 0.5, 1.0);
+    Var<float>::Attach("ui.blue_fac", blue_fac, 0.5, 1.0);
+    Var<float>::Attach("ui.gamma", gamma, 0.1, 1.0);
     Var<float>::Attach("ui.vig_scale", vig_scale, 0.5, 1.5);
 
     Eigen::Vector2f offset_scale(0.0f, 1.0f);
@@ -229,8 +227,14 @@ int main( int /*argc*/, char** /*argv*/ )
     {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        log.Clear();
-        log.Log(4,histogram.data(),histogram.cols());
+        {
+            Eigen::Matrix<float,4,Eigen::Dynamic> avg(4,hist_bins);
+            for(size_t c=0; c < 4; ++c) {
+                avg.row(c) = histogram[c].sum / histogram[c].num.cast<float>();
+            }
+            log.Clear();
+            log.Log(4,avg.data(),avg.cols());
+        }
 
         for(int i=0; i < 4; ++i) upload_next_texture();
 

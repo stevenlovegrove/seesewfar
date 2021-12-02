@@ -110,7 +110,8 @@ template<typename P, size_t K, typename C = P>
 Eigen::VectorX<C> eval_cardinal_basis_spline(const Eigen::MatrixX<C>& control_points, P t )
 {
     const size_t i(t);
-    assert(i <= control_points.size() - K);
+    assert(i <= control_points.cols() - K);
+    assert(K <= control_points.cols());
 
     const P u = t - i;
     const Eigen::Vector<P,K> t_pows = powers<P,K>(u);
@@ -124,6 +125,8 @@ Eigen::VectorX<C> eval_cardinal_basis_spline(const Eigen::MatrixX<C>& control_po
 template<typename P, size_t K, typename C = P>
 Eigen::MatrixX<C> eval_cardinal_basis_spline(const Eigen::MatrixX<C>& control_points, const Eigen::Matrix<P,1,Eigen::Dynamic>& ts )
 {
+    assert(K <= control_points.cols());
+
     const Eigen::Matrix<int,1,Eigen::Dynamic> is = ts.template cast<int>();
     const Eigen::Matrix<P,1,Eigen::Dynamic> us = ts - is.template cast<P>();
     const Eigen::Matrix<P,K,Eigen::Dynamic> t_pows = powers<P,K>(us);
