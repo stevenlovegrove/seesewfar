@@ -39,6 +39,9 @@ using namespace pangolin;
 
 int main( int /*argc*/, char** /*argv*/ )
 {
+//    test();
+//    return 0;
+
     const std::string path = "/Users/stevenlovegrove/code/telescope/data/DSC*.ARW";
     std::vector<std::string> image_filenames;
     {
@@ -73,7 +76,7 @@ int main( int /*argc*/, char** /*argv*/ )
     // load rest in parallel.
     async::cancellation_token cancel_point;
     std::vector<async::task<void>> loading_tasks;
-    const size_t hist_bins = 2000;
+    const size_t hist_bins = 1200;
 
     PolarHistogram histogram[4] = { {hist_bins}, {hist_bins}, {hist_bins}, {hist_bins} };
 
@@ -228,12 +231,31 @@ int main( int /*argc*/, char** /*argv*/ )
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         {
-            Eigen::Matrix<float,4,Eigen::Dynamic> avg(4,hist_bins);
+            Eigen::Matrix<float,5,Eigen::Dynamic> data_to_plot(5,hist_bins);
+
             for(size_t c=0; c < 4; ++c) {
-                avg.row(c) = histogram[c].sum / histogram[c].num.cast<float>();
+                data_to_plot.row(c) = histogram[c].sum / histogram[c].num.cast<float>();
             }
+
+            // fit spline
+            Eigen::Matrix<double,1,Eigen::Dynamic> rad(1, hist_bins);
+            for(size_t i=0; i < hist_bins; ++i) rad[i] = double(i);
+
+            const size_t K = 3;
+            const double control_point_interval = 600.0;
+            const size_t num_control_points = int(hist_bins/control_point_interval) + K;
+            std::cout << "num_control_points: " << num_control_points << std::endl;
+            const Eigen::MatrixXd control_points = fit_cardinal_basis_spline<double,K,double>(
+                num_control_points, control_point_interval, rad, data_to_plot.row(0).cast<double>()
+            );
+            const Eigen::MatrixXd samples = eval_cardinal_basis_spline<double,K,double>(
+                control_point_interval, control_points, rad
+            );
+            data_to_plot.row(4) = samples.cast<float>();
+
             log.Clear();
-            log.Log(4,avg.data(),avg.cols());
+            log.Log(data_to_plot.rows(), data_to_plot.data(), data_to_plot.cols());
+
         }
 
         for(int i=0; i < 4; ++i) upload_next_texture();
