@@ -7,3 +7,6 @@
 [submodule "asyncplusplus"]
 	path = asyncplusplus
 	url = git@github.com:Amanieu/asyncplusplus.git
+[submodule "date"]
+	path = date
+	url = git@github.com:HowardHinnant/date.git

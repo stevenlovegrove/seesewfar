@@ -26,13 +26,11 @@
 #include "utils.h"
 #include "vignette_histogram.h"
 #include "bspline.h"
+#include "star_map.h"
 
 using namespace pangolin;
 
 // TODO:
-// * Vignette
-// * color balance
-// * HDR (start with gamma)
 // * auto tracking.
 // * Align to star map
 // * dynamic resolution based on view window?
@@ -40,9 +38,10 @@ using namespace pangolin;
 int main( int /*argc*/, char** /*argv*/ )
 {
 //    test();
-//    return 0;
+    test_star_map();
+    return 0;
 
-    const std::string path = "/Users/stevenlovegrove/code/telescope/data/DSC*.ARW";
+    const std::string path = "/Users/stevenlovegrove/code/telescope/data/set1/DSC*.ARW";
     std::vector<std::string> image_filenames;
     {
         pangolin::FilesMatchingWildcard(path, image_filenames);

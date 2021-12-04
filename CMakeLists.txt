@@ -13,9 +13,17 @@ add_executable(stitch src/main.cpp)
 target_link_libraries(stitch pango_display pango_video pango_plot Sophus::Sophus)
 
 set(ENABLE_OPENMP false)
+set(BUILD_TZ_LIB true)
 set(LIBRAW_PATH "${CMAKE_CURRENT_SOURCE_DIR}/LibRaw/")
 add_subdirectory(LibRaw-cmake)
 add_subdirectory(asyncplusplus)
-target_link_libraries(stitch libraw::libraw_r Async++)
+add_subdirectory(date)
+target_link_libraries(stitch libraw::libraw_r Async++ date date-tz)
 
-#target_link_libraries(stitch "/opt/local/lib/libraw_r.dylib")
+target_include_directories(stitch PRIVATE "/Users/stevenlovegrove/local/include")
+
+target_link_libraries(stitch "/Users/stevenlovegrove/local/lib/libjpl.a")
+target_link_libraries(stitch "/Users/stevenlovegrove/local/lib/liblunar.a")
+
+target_include_directories(stitch PRIVATE "/usr/local/include")
+target_link_libraries(stitch "/usr/local/lib/libcalceph.dylib")
