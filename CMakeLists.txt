@@ -26,4 +26,5 @@ target_link_libraries(stitch "/Users/stevenlovegrove/local/lib/libjpl.a")
 target_link_libraries(stitch "/Users/stevenlovegrove/local/lib/liblunar.a")
 
 target_include_directories(stitch PRIVATE "/usr/local/include")
-target_link_libraries(stitch "/usr/local/lib/libcalceph.dylib")
+#target_link_libraries(stitch "/usr/local/lib/libcalceph.dylib")
+target_link_libraries(stitch "/Users/stevenlovegrove/code/calceph-3.5.0/src/.libs/libcalceph.dylib")
