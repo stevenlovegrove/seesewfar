@@ -26,6 +26,7 @@
 
 constexpr double AU_IN_KM = 1.49597870691e+8;
 constexpr double J2000_jd = 2451545.0;
+constexpr double EARTH_MEAN_RADIUS_KM = 6371.009;
 
 // Frames of reference:
 //
@@ -83,7 +84,7 @@ constexpr double J2000_jd = 2451545.0;
 //        where R_Earth(t)_J2000 is the rotation matrix that transforms the J2000 frame to the Earth(t) frame.
 //
 //
-// Moon:
+// LunaME:
 //        Mean Earth / Polar Axis (ME) reference coordinate system.
 //        https://lunar.gsfc.nasa.gov/library/LunCoordWhitePaper-10-08.pdf
 //
@@ -93,6 +94,9 @@ constexpr double J2000_jd = 2451545.0;
 //        x-axis: Intersection of equitorial plane and Lunar Prime Meridian, where the Prime Meridian
 //                is the plane of mean earth direction.
 //        y-axis: Ad a right handed system, can be found from the cross product of z and x axes.
+//
+// LunaPA:
+//        ... not sure exactly but this is how the orientation of moon is defined for JPL ephemeris
 
 
 // Return rotation transform which takes a (lat,lon) in frame J2000 into frame LatLon2000 as defined above
@@ -111,7 +115,7 @@ Sophus::SO3<T> R_J2000_LatLon2000(T lat, T lon)
 
 // Return point on (lat,lon) vector with magnitude alt_km in J2000 reference
 template<typename T>
-Eigen::Vector3<T> LatLon_J2000(T lat, T lon, T radius_km = 6371.009)
+Eigen::Vector3<T> LatLon_J2000(T lat, T lon, T radius_km = EARTH_MEAN_RADIUS_KM)
 {
     return R_J2000_LatLon2000<T>(lat, lon) * Eigen::Vector3<T>(0.0, 0.0, radius_km);
 }
@@ -150,9 +154,9 @@ Sophus::SO3<P> R_J2000_LunaPA(const Eigen::Vector3<P>& libration)
 
 // Return point on (lat,lon) vector with magnitude alt_km in Earth(jd) reference
 template<typename P, typename Time>
-Eigen::Vector3<P> LatLon_Earth(const Time t, P lat, P lon, P alt_km = 6371.009)
+Eigen::Vector3<P> LatLon_Earth(const Time t, P lat, P lon, P radius_km = EARTH_MEAN_RADIUS_KM)
 {
-    return R_Earth_J2000<P,Time>(t) * LatLon_J2000<P>(lat, lon, alt_km);
+    return R_Earth_J2000<P,Time>(t) * LatLon_J2000<P>(lat, lon, radius_km);
 }
 
 void test_star_map2()
@@ -177,10 +181,6 @@ double utc_timepoint_to_jd(const std::chrono::system_clock::time_point& utc_time
     const double JD = JD_noon + day_fraction_from_noon;
     return JD;
 }
-
-
-
-
 
 template<typename Derived>
 void glTranslate(const Eigen::DenseBase<Derived>& x)
@@ -262,14 +262,15 @@ void RenderSolarSystem(t_calcephbin *peph, double jd0, double jd_offset, int cen
         T_wo.translation() = P_center.head<3>();
 
         if(obj.naif_id == NAIFID_EARTH) {
+//            // TODO: add nutation angle adjustment
+//            Eigen::Vector<double,6> nutation;
+//            calceph_orient_unit(peph, jd0, jd_offset, NAIFID_EARTH, CALCEPH_USE_NAIFID | CALCEPH_OUTPUT_NUTATIONANGLES | CALCEPH_UNIT_RAD | CALCEPH_UNIT_SEC, nutation.data() );
+
             T_wo.so3() = R_Earth_J2000<double>(TimeJED<double>{jd0+jd_offset}).inverse().matrix();
         }else if(obj.naif_id == NAIFID_MOON) {
             Eigen::Vector<double,6> libration;
             calceph_orient_unit(peph, jd0, jd_offset, NAIFID_MOON, CALCEPH_USE_NAIFID | CALCEPH_OUTPUT_EULERANGLES | CALCEPH_UNIT_RAD | CALCEPH_UNIT_SEC, libration.data() );
             T_wo.so3() = R_J2000_LunaPA<double>(libration.head<3>());
-//            const Eigen::Vector<double,3> Earth_center = BodyPosition(peph, jd0, jd_offset, NAIFID_EARTH, center_body);
-//            const Eigen::Vector<double,3> moon_to_earth = Earth_center - P_center;
-
         }
         glMultMatrix(T_wo);
 
@@ -282,6 +283,8 @@ void RenderSolarSystem(t_calcephbin *peph, double jd0, double jd_offset, int cen
         pangolin::glDrawAxis(1.0);
     }
 }
+
+// https://svs.gsfc.nasa.gov/4851 good resource for celestial textures
 
 void test_star_map()
 {

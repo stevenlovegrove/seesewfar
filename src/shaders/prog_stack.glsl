@@ -1,8 +1,3 @@
-#pragma once
-
-#include <string>
-
-constexpr char star_shader[] = R"Shader(
 @start vertex
 #version 120
 attribute vec3 a_position;
@@ -18,6 +13,9 @@ void main() {
 
 #expect NUM_CP
 
+#include "spline.glsl"
+#include "camera.glsl"
+
 varying vec2 v_pos;
 uniform vec2 u_dim;
 uniform vec3 u_color;
@@ -30,43 +28,6 @@ uniform mat3  u_spline_matrix;
 
 uniform sampler2D tex;
 
-vec3 powers3(float u)
-{
-    return vec3(1,u,u*u);
-}
-
-float bspline3(float spline_interval, float spline_control_points[NUM_CP], mat3 spline_matrix, float t)
-{
-    float tc = t / spline_interval;
-    int i = int(tc);
-    float u = tc - i;
-    vec3 t_pows = powers3(u);
-    vec3 coeffs = spline_matrix * t_pows;
-
-    float v = 0;
-    if(i+3 <= NUM_CP) {
-        for(int j=0; j < 3; ++j) {
-            v += coeffs[j] * spline_control_points[i+j];
-        }
-    }
-    return v;
-}
-
-vec3 Unproject(vec2 p)
-{
-    return vec3(p, 1.0);
-}
-
-vec2 Project(vec3 p)
-{
-    return vec2(p.x/p.z, p.y/p.z);
-}
-
-vec2 Pix2Tex(vec2 p, vec2 dim)
-{
-    return (p + vec2(0.5)) / dim;
-}
-
 void main() {
     vec2 Pa = (v_pos * vec2(0.5,-0.5) + vec2(0.5,0.5)) * u_dim - vec2(0.5);
     vec2 Pb = Project(u_KRbaKinv * Unproject(Pa));
@@ -76,4 +37,3 @@ void main() {
     float I = pow(x, u_gamma);
     gl_FragColor = vec4(I*u_color, 1.0);
 }
-)Shader";

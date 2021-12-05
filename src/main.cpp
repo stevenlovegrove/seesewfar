@@ -21,7 +21,6 @@
 #include <queue>
 #include <cmath>
 
-#include "star_shader.h"
 #include "image_loading.h"
 #include "utils.h"
 #include "vignette_histogram.h"
@@ -35,16 +34,23 @@ using namespace pangolin;
 // * Align to star map
 // * dynamic resolution based on view window?
 
-int main( int /*argc*/, char** /*argv*/ )
+int main( int argc, char** argv )
 {
 //    test();
-    test_star_map();
-    return 0;
+//    test_star_map();
+//    return 0;
 
-    const std::string path = "/Users/stevenlovegrove/code/telescope/data/set1/DSC*.ARW";
+    const std::string shader_dir = pangolin::FindPath(argv[0], "/src/shaders");
+    if(shader_dir.empty()) throw std::runtime_error("Couldn't find runtime shader dir.");
+
+    const std::string data_dir = pangolin::FindPath(argv[0], "/data");
+    const std::string starmap_filename = data_dir + "/starmaps/starmap_2020_4k.exr";
+    const std::string image_glob = data_dir + "/image_sets/set1/DSC*.ARW";
+
+    // Find images
     std::vector<std::string> image_filenames;
     {
-        pangolin::FilesMatchingWildcard(path, image_filenames);
+        pangolin::FilesMatchingWildcard(image_glob, image_filenames);
         if(image_filenames.size() == 0) {
             std::cerr << "No images to load. Exiting." << std::endl;
             return -1;
@@ -110,9 +116,16 @@ int main( int /*argc*/, char** /*argv*/ )
     container.SetHandler(new Handler());
     container.AddDisplay(view).AddDisplay(plot);
 
-    pangolin::GlSlProgram prog;
-    prog.AddShader( pangolin::GlSlAnnotatedShader, star_shader, {{"NUM_CP","5"}} );
-    prog.Link();
+    pangolin::GlSlProgram prog_stack;
+    prog_stack.AddShaderFromFile(pangolin::GlSlAnnotatedShader, shader_dir+"/prog_stack.glsl", {{"NUM_CP","5"}}, {shader_dir} );
+    prog_stack.Link();
+
+    pangolin::GlSlProgram prog_carree;
+    prog_carree.AddShaderFromFile( pangolin::GlSlAnnotatedShader, shader_dir+"/prog_carree.glsl", {}, {shader_dir});
+    prog_carree.Link();
+
+    pangolin::GlTexture tex_starmap;
+    tex_starmap.LoadFromFile(starmap_filename);
 
     for(size_t i=0; i < container.NumChildren(); ++i) {
         pangolin::RegisterKeyPressCallback('1'+i, [i,&container](){ container[i].ToggleShow(); });
@@ -158,14 +171,14 @@ int main( int /*argc*/, char** /*argv*/ )
 
         const Eigen::Matrix3d H = K * R_ba.matrix() * Kinv;
 
-        prog.Bind();
-        prog.SetUniform("u_KRbaKinv", H.cast<float>().eval() );
-        prog.SetUniform("u_dim", dims.cast<float>().eval() );
-        prog.SetUniform("u_color", colors[bayer_channel] );
-        prog.SetUniform("u_gamma", gamma );
-        prog.SetUniform("u_spline_interval", (float)control_point_interval );
-        glUniform1fv( prog.GetUniformHandle("u_spline_control_points"), num_control_points, control_points.row(bayer_channel).cast<float>().eval().data() );
-        prog.SetUniform("u_spline_matrix", SplineConstants<double,spline_K>::cardinal_matrix().cast<float>().eval() );
+        prog_stack.Bind();
+        prog_stack.SetUniform("u_KRbaKinv", H.cast<float>().eval() );
+        prog_stack.SetUniform("u_dim", dims.cast<float>().eval() );
+        prog_stack.SetUniform("u_color", colors[bayer_channel] );
+        prog_stack.SetUniform("u_gamma", gamma );
+        prog_stack.SetUniform("u_spline_interval", (float)control_point_interval );
+        glUniform1fv( prog_stack.GetUniformHandle("u_spline_control_points"), num_control_points, control_points.row(bayer_channel).cast<float>().eval().data() );
+        prog_stack.SetUniform("u_spline_matrix", SplineConstants<double,spline_K>::cardinal_matrix().cast<float>().eval() );
 
         tex.Bind();
         glEnable(GL_TEXTURE_2D);
@@ -174,7 +187,7 @@ int main( int /*argc*/, char** /*argv*/ )
         glDrawRect(-1,-1,1,1);
         glDisable(GL_TEXTURE_2D);
         glBindTexture(GL_TEXTURE_2D, 0);
-        prog.Unbind();
+        prog_stack.Unbind();
     };
 
     std::vector<std::shared_ptr<TextureAndInfo>> textures;
