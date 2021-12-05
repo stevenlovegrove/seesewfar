@@ -26,6 +26,7 @@
 #include "vignette_histogram.h"
 #include "bspline.h"
 #include "star_map.h"
+#include "coord_convention.h"
 
 using namespace pangolin;
 
@@ -45,6 +46,7 @@ int main( int argc, char** argv )
 
     const std::string data_dir = pangolin::FindPath(argv[0], "/data");
     const std::string starmap_filename = data_dir + "/starmaps/starmap_2020_4k.exr";
+//    const std::string starmap_filename = data_dir + "/starmaps/test.jpg";
     const std::string image_glob = data_dir + "/image_sets/set1/DSC*.ARW";
 
     // Find images
@@ -99,22 +101,26 @@ int main( int argc, char** argv )
     CreateWindowAndBind("Main",640,480);
     glEnable(GL_DEPTH_TEST);
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
 
     const int UI_WIDTH = 20* default_font().MaxWidth();
     pangolin::CreatePanel("ui").SetBounds(0.0, 1.0, 0.0, Attach::Pix(UI_WIDTH));
     DataLog log;
-    Plotter plot(&log);
+//    Plotter plot(&log);
 
-    ImageView view;
+    ImageView view_composite;
     const double aspect = width / (double)height;
-    view.SetAspect(aspect);
-    view.offset_scale.second = 10.0f;
+    view_composite.SetAspect(aspect);
+    view_composite.offset_scale.second = 10.0f;
+
+    View view_starmap;
 
     View container;
     DisplayBase().AddDisplay(container);
     container.SetBounds(0.0, 1.0, Attach::Pix(UI_WIDTH), 1.0).SetLayout(LayoutEqual);
     container.SetHandler(new Handler());
-    container.AddDisplay(view).AddDisplay(plot);
+    container.AddDisplay(view_composite).AddDisplay(view_starmap); //.AddDisplay(plot);
 
     pangolin::GlSlProgram prog_stack;
     prog_stack.AddShaderFromFile(pangolin::GlSlAnnotatedShader, shader_dir+"/prog_stack.glsl", {{"NUM_CP","5"}}, {shader_dir} );
@@ -125,7 +131,8 @@ int main( int argc, char** argv )
     prog_carree.Link();
 
     pangolin::GlTexture tex_starmap;
-    tex_starmap.LoadFromFile(starmap_filename);
+    auto img = pangolin::LoadImage(starmap_filename);
+    tex_starmap.Load(img);
 
     for(size_t i=0; i < container.NumChildren(); ++i) {
         pangolin::RegisterKeyPressCallback('1'+i, [i,&container](){ container[i].ToggleShow(); });
@@ -234,14 +241,52 @@ int main( int argc, char** argv )
 
         Eigen::Matrix3d K_channel_inv = K_channel.inverse();
 
+        // TODO - I think I have channel and image K matrices wrong way around. Fix
         render_warped(R_ba, K_image, K_channel_inv, t->tex, t->info.bayer_channel);
     };
 
-    const size_t view_scale = 4;
-    view.tex = GlTexture(view_scale*width,view_scale*height,GL_RGB32F);
-    GlFramebuffer buffer(view.tex);
+    view_starmap.extern_draw_function = [&](View& v){
+        view_starmap.Activate();
+        // Use same view as composite
+        const pangolin::XYRangef& xy = view_composite.GetViewToRender();
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+//        ProjectionMatrixOrthographic(xy.x.min, xy.x.max, xy.y.max, xy.y.min, -1.0f, 1.0f).Load();
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
 
-    view.SetDimensions(view_scale*width,view_scale*height);
+        Eigen::Matrix3d K_image;
+        K_image << focal_pix, 0.0, width / 2.0,
+             0.0, focal_pix, height / 2.0,
+             0.0, 0.0, 1.0;
+
+         // TODO set this
+        const Sophus::SO3d R_J2000_Camera = Sophus::SO3d::rotX(M_PI/2.0) * R_vis_gl;
+
+        const Eigen::Matrix3d RKinv = R_J2000_Camera.matrix() * K_image.inverse();
+
+        prog_carree.Bind();
+        prog_carree.SetUniform("u_RbaKinv", RKinv.cast<float>().eval() );
+        prog_carree.SetUniform("u_dim", dims.cast<float>().eval() );
+        prog_carree.SetUniform("u_gamma", gamma );
+        prog_carree.SetUniform("u_color", red_fac, green_fac, blue_fac );
+
+
+        tex_starmap.Bind();
+        glEnable(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glDrawRect(-1,-1,1,1);
+        glDisable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        prog_carree.Unbind();
+    };
+
+    const size_t view_scale = 4;
+    view_composite.tex = GlTexture(view_scale*width,view_scale*height,GL_RGB32F);
+    GlFramebuffer buffer(view_composite.tex);
+
+    view_composite.SetDimensions(view_scale*width,view_scale*height);
 
     size_t num_fused = 0;
 
@@ -276,8 +321,8 @@ int main( int argc, char** argv )
 
         if(GuiVarHasChanged()) {
             // Restart
-            view.offset_scale.first = view.offset_scale.first / num_fused;
-            view.offset_scale.second = view.offset_scale.second * num_fused;
+            view_composite.offset_scale.first = view_composite.offset_scale.first / num_fused;
+            view_composite.offset_scale.second = view_composite.offset_scale.second * num_fused;
 
             buffer.Bind();
             glViewport(0,0,view_scale*width,view_scale*height);
@@ -301,8 +346,8 @@ int main( int argc, char** argv )
                 render_next_tex();
 
                 if(num_fused) {
-                    view.offset_scale.first = view.offset_scale.first / num_fused * (num_fused+1);
-                    view.offset_scale.second = view.offset_scale.second * num_fused / (num_fused+1);
+                    view_composite.offset_scale.first = view_composite.offset_scale.first / num_fused * (num_fused+1);
+                    view_composite.offset_scale.second = view_composite.offset_scale.second * num_fused / (num_fused+1);
                 }
                 ++num_fused;
             }
