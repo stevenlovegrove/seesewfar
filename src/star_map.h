@@ -2,6 +2,7 @@
 #include <chrono>
 #include <iomanip>
 #include <stdio.h>
+#include <type_traits>
 
 #include <watdefs.h>
 #include <jpleph.h>
@@ -21,7 +22,7 @@
 #include <pangolin/display/default_font.h>
 #include <pangolin/handler/handler.h>
 
-#include <sophus/so3.hpp>
+#include <sophus/se3.hpp>
 
 constexpr double AU_IN_KM = 1.49597870691e+8;
 constexpr double J2000_jd = 2451545.0;
@@ -35,6 +36,8 @@ constexpr double J2000_jd = 2451545.0;
 //        This inertial (non-rotating) reference frame is defined by the following orthogonal
 //        axis directions:
 //          z-axis: normal to the the mean equatorial plane, or equivelently the mean rotational axis.
+//                  +ive direction faces north and is consistent with the right hand rule wrt body
+//                  rotation around z.
 //                  Note that the mean is used because the Earth wiggles slightly on this axis
 //                  (nutations, processions, polar motion) and adjustments for times beyond J2000 are
 //                  simpler from the mean and not true orientation at this time.
@@ -78,6 +81,19 @@ constexpr double J2000_jd = 2451545.0;
 //        LatLon(t, lat, lon) = R_Earth(t)_J2000 * LatLon2000(lat,lon),
 //
 //        where R_Earth(t)_J2000 is the rotation matrix that transforms the J2000 frame to the Earth(t) frame.
+//
+//
+// Moon:
+//        Mean Earth / Polar Axis (ME) reference coordinate system.
+//        https://lunar.gsfc.nasa.gov/library/LunCoordWhitePaper-10-08.pdf
+//
+//        z-axis: normal to the the mean equatorial plane, or equivelently the mean rotational axis.
+//                +ive direction faces north and is consistent with the right hand rule wrt body
+//                rotation around z.
+//        x-axis: Intersection of equitorial plane and Lunar Prime Meridian, where the Prime Meridian
+//                is the plane of mean earth direction.
+//        y-axis: Ad a right handed system, can be found from the cross product of z and x axes.
+
 
 // Return rotation transform which takes a (lat,lon) in frame J2000 into frame LatLon2000 as defined above
 template<typename T>
@@ -93,29 +109,53 @@ Sophus::SO3<T> R_J2000_LatLon2000(T lat, T lon)
     return R_LatLon2000_J2000<T>(lat,lon).inverse();
 }
 
-// Return rotation transform which takes frame J2000 into Earth(jd) as defined above
-template<typename T>
-Sophus::SO3<T> R_Earth_J2000(T jd)
-{
-    return Sophus::SO3<T>::rotZ(jd * Sophus::Constants<double>::tau());
-}
-
 // Return point on (lat,lon) vector with magnitude alt_km in J2000 reference
 template<typename T>
-Eigen::Vector3<T> LatLon_J2000(T lat, T lon, T alt_km = 6371.009)
+Eigen::Vector3<T> LatLon_J2000(T lat, T lon, T radius_km = 6371.009)
 {
-    return R_J2000_LatLon2000<T>(lat, lon) * Eigen::Vector3<T>(0.0, 0.0, alt_km);
+    return R_J2000_LatLon2000<T>(lat, lon) * Eigen::Vector3<T>(0.0, 0.0, radius_km);
+}
+
+template<typename P>
+struct TimeJED
+{
+    P JED() const {
+        return jed;
+    }
+
+    P JD_Since_JD2000() const {
+        return jed - static_cast<P>(J2000_jd);
+    }
+
+    P jed;
+};
+
+// Return rotation transform which takes frame J2000 into Earth(jd) as defined above
+template<typename P, typename Time>
+Sophus::SO3<P> R_Earth_J2000(const Time t)
+{
+    return Sophus::SO3<P>::rotZ(t.JD_Since_JD2000() * Sophus::Constants<double>::tau());
+}
+
+template<typename P>
+Sophus::SO3<P> R_J2000_LunaPA(const Eigen::Vector3<P>& libration)
+{
+    // https://ssd.jpl.nasa.gov/doc/Park.2021.AJ.DE440.pdf eqn 8 for interpreting libration angles
+
+    const double phi = libration[0];
+    const double theta = libration[1];
+    const double psi = libration[2];
+    return Sophus::SO3d::rotZ(phi) * Sophus::SO3d::rotX(theta) * Sophus::SO3d::rotZ(psi);
 }
 
 // Return point on (lat,lon) vector with magnitude alt_km in Earth(jd) reference
-template<typename T>
-Eigen::Vector3<T> LatLon_Earth(T jd, T lat, T lon, T alt_km = 6371.009)
+template<typename P, typename Time>
+Eigen::Vector3<P> LatLon_Earth(const Time t, P lat, P lon, P alt_km = 6371.009)
 {
-    return R_Earth_J2000<T>(jd) * LatLon_J2000<T>(lat, lon, alt_km);
+    return R_Earth_J2000<P,Time>(t) * LatLon_J2000<P>(lat, lon, alt_km);
 }
 
-void
-test_star_map2()
+void test_star_map2()
 {
     auto zt = date::make_zoned(date::current_zone(), std::chrono::system_clock::now());
     auto ld = date::floor<date::days>(zt.get_local_time());
@@ -140,10 +180,7 @@ double utc_timepoint_to_jd(const std::chrono::system_clock::time_point& utc_time
 
 
 
-void attempt2()
-{
 
-}
 
 template<typename Derived>
 void glTranslate(const Eigen::DenseBase<Derived>& x)
@@ -151,7 +188,46 @@ void glTranslate(const Eigen::DenseBase<Derived>& x)
     glTranslated(x[0], x[1], x[2]);
 }
 
-void RenderSolarSystem(t_calcephbin *peph, double jd0, double jd_offset)
+template<typename P>
+void glLoadMatrix(const Eigen::Matrix<P,4,4,Eigen::ColMajor>& T_parent_child)
+{
+    if constexpr( std::is_same_v<P,double>) {
+        glLoadMatrixd(T_parent_child.data());
+    } else if constexpr( std::is_same_v<P,float>) {
+        glLoadMatrixf(T_parent_child.data());
+    }
+}
+
+template<typename P>
+void glLoadMatrix(const Sophus::SE3<P>& T_parent_child)
+{
+    glLoadMatrix(T_parent_child.matrix());
+}
+
+template<typename P>
+void glMultMatrix(const Eigen::Matrix<P,4,4,Eigen::ColMajor>& T_parent_child)
+{
+    if constexpr( std::is_same_v<P,double>) {
+        glMultMatrixd(T_parent_child.data());
+    } else if constexpr( std::is_same_v<P,float>) {
+        glMultMatrixf(T_parent_child.data());
+    }
+}
+
+template<typename P>
+void glMultMatrix(const Sophus::SE3<P>& T_parent_child)
+{
+    glMultMatrix(T_parent_child.matrix());
+}
+
+Eigen::Vector3d BodyPosition(t_calcephbin *peph, double jd0, double jd_offset, int body_naif, int center_naif)
+{
+    Eigen::Vector<double,6> Body_center;
+    calceph_compute_unit(peph, jd0, jd_offset, body_naif, center_naif, CALCEPH_USE_NAIFID | CALCEPH_UNIT_AU | CALCEPH_UNIT_DAY, Body_center.data());
+    return Body_center.head<3>();
+}
+
+void RenderSolarSystem(t_calcephbin *peph, double jd0, double jd_offset, int center_body = NAIFID_SUN, double body_scale = 1.0)
 {
     struct ObjectOfInterest
     {
@@ -159,73 +235,45 @@ void RenderSolarSystem(t_calcephbin *peph, double jd0, double jd_offset)
         double radius_au;
     };
 
-//    std::vector<ObjectOfInterest> objects = {
-//        {NAIFID_MERCURY,     4900 / AU_IN_KM / 2.0}, // Mercury center
-//        {NAIFID_VENUS,      12100 / AU_IN_KM / 2.0}, // Venus center
-//        {NAIFID_EARTH,      12800 / AU_IN_KM / 2.0}, // ...
-//        {NAIFID_MARS,        6800 / AU_IN_KM / 2.0},
-//        {NAIFID_JUPITER,   143000 / AU_IN_KM / 2.0},
-//        {NAIFID_SATURN,    120500 / AU_IN_KM / 2.0},
-//        {NAIFID_URANUS,     51100 / AU_IN_KM / 2.0},
-//        {NAIFID_NEPTUNE,    49500 / AU_IN_KM / 2.0},
-//        {NAIFID_PLUTO,     2376.6 / AU_IN_KM / 2.0}, // Pluto center
-//        {NAIFID_SUN,    1391000.0 / AU_IN_KM / 2.0}, // Sun center
-//        {NAIFID_MOON,     34748.0 / AU_IN_KM / 2.0}  // Moon center
-//    };
-
-    std::vector<ObjectOfInterest> objects = {
-        {1,     4900 / AU_IN_KM / 2.0}, // Mercury center
-        {2,      12100 / AU_IN_KM / 2.0}, // Venus center
-        {3,      12800 / AU_IN_KM / 2.0}, // ...
-        {4,        6800 / AU_IN_KM / 2.0},
-        {5,   143000 / AU_IN_KM / 2.0},
-        {6,    120500 / AU_IN_KM / 2.0},
-        {7,     51100 / AU_IN_KM / 2.0},
-        {8,    49500 / AU_IN_KM / 2.0},
-        {9,     2376.6 / AU_IN_KM / 2.0}, // Pluto center
-        {10,    1391000.0 / AU_IN_KM / 2.0}, // Sun center
-//        {NAIFID_MOON,     34748.0 / AU_IN_KM / 2.0}  // Moon center
+    const static std::vector<ObjectOfInterest> objects = {
+        {NAIFID_MERCURY_BARYCENTER,     4900 / AU_IN_KM / 2.0},
+        {NAIFID_VENUS_BARYCENTER,      12100 / AU_IN_KM / 2.0},
+        {NAIFID_EARTH,                 12800 / AU_IN_KM / 2.0},
+        {NAIFID_MARS_BARYCENTER,        6800 / AU_IN_KM / 2.0},
+        {NAIFID_JUPITER_BARYCENTER,   143000 / AU_IN_KM / 2.0},
+        {NAIFID_SATURN_BARYCENTER,    120500 / AU_IN_KM / 2.0},
+        {NAIFID_URANUS_BARYCENTER,     51100 / AU_IN_KM / 2.0},
+        {NAIFID_NEPTUNE_BARYCENTER,    49500 / AU_IN_KM / 2.0},
+        {NAIFID_PLUTO_BARYCENTER,     2376.6 / AU_IN_KM / 2.0},
+        {NAIFID_SUN,               1391000.0 / AU_IN_KM / 2.0},
+        {NAIFID_MOON,                 3474.8 / AU_IN_KM / 2.0}
     };
-
-//    const Eigen::Vector<double,11> body_dia_km = {
-//        0.0,   // Solar System
-//          4900,  // mercury
-//         12100, // venus
-//         12800, // ...
-//          6800,
-//        143000,
-//        120500,
-//         51100,
-//         49500,
-//        2376.6, // pluto
-//        34748.0, // moon
-//     1391000.0 // sun
-//    };
-
-//    const Eigen::Vector<double,11> body_rad_au =body_dia_km / AU_IN_KM / 2.0;
-
 
     for( const auto& obj : objects)
     {
         if(obj.naif_id == NAIFID_SUN) continue;
 
-        Eigen::Vector<double,6> P_sun;
-        Eigen::Vector<double,6> Euler_sun;
+        const Eigen::Vector<double,3> P_center = BodyPosition(peph, jd0, jd_offset, obj.naif_id, center_body);
 
-//        jpl_pleph( p, jd, i, 12, P_sun.data(), 0);
-//        std::cout << "-----------" << std::endl;
-        calceph_compute_unit(peph, jd0, jd_offset, obj.naif_id, 11, CALCEPH_UNIT_AU | CALCEPH_UNIT_DAY, P_sun.data());
-        calceph_orient_order(peph, jd0, jd_offset, NAIFID_EARTH, CALCEPH_USE_NAIFID | CALCEPH_UNIT_SEC | CALCEPH_UNIT_RAD | CALCEPH_OUTPUT_NUTATIONANGLES, 0, Euler_sun.data());
-
-//        std::cout << P_sun.transpose() << std::endl;
-//        std::cout << Sun_P.transpose() << std::endl;
-//        std::cout << (P_sun+Sun_P).transpose() << std::endl;
-
+        glMatrixMode(GL_MODELVIEW);
         glPushMatrix();
-        glTranslate(P_sun.head<3>());
 
-//        const double rad = body_rad_au[i] * 100.0;
-        const double rad = obj.radius_au * 1000.0;
+        Sophus::SE3d T_wo;
+        T_wo.translation() = P_center.head<3>();
+
+        if(obj.naif_id == NAIFID_EARTH) {
+            T_wo.so3() = R_Earth_J2000<double>(TimeJED<double>{jd0+jd_offset}).inverse().matrix();
+        }else if(obj.naif_id == NAIFID_MOON) {
+            Eigen::Vector<double,6> libration;
+            calceph_orient_unit(peph, jd0, jd_offset, NAIFID_MOON, CALCEPH_USE_NAIFID | CALCEPH_OUTPUT_EULERANGLES | CALCEPH_UNIT_RAD | CALCEPH_UNIT_SEC, libration.data() );
+            T_wo.so3() = R_J2000_LunaPA<double>(libration.head<3>());
+//            const Eigen::Vector<double,3> Earth_center = BodyPosition(peph, jd0, jd_offset, NAIFID_EARTH, center_body);
+//            const Eigen::Vector<double,3> moon_to_earth = Earth_center - P_center;
+
+        }
+        glMultMatrix(T_wo);
+
+        const double rad = obj.radius_au * body_scale;
 
         pangolin::glDrawColouredCube(-rad, +rad);
         glPopMatrix();
@@ -244,10 +292,11 @@ void test_star_map()
 //        "/Users/stevenlovegrove/Downloads/eph/de-403-masses.tpc",
 //        "/Users/stevenlovegrove/Downloads/eph/moon_pa_de430_1550-2650.bpc",
 //        "/Users/stevenlovegrove/Downloads/eph/lnxp1600p2200.405",
-          "/Users/stevenlovegrove/Downloads/eph/linux_m13000p17000.441",
+        "/Users/stevenlovegrove/code/telescope/data/de440/linux_p1550p2650.440"
+//          "/Users/stevenlovegrove/Downloads/eph/linux_m13000p17000.441",
+//        "/Users/stevenlovegrove/Downloads/horizons_4660.txt", // doesn't seem to work
     };
 
-//    t_calcephbin *peph = calceph_open("/Users/stevenlovegrove/code/telescope/data/de440/linux_p1550p2650.440");
     t_calcephbin *peph = calceph_open_array(std::size(files), files);
     if (!peph) throw std::runtime_error("Couldn't open ephemeris file.");
 
@@ -259,26 +308,14 @@ void test_star_map()
     if (!calceph_gettimespan(peph,  &start_jd, &end_jd, &countinuous))
         throw std::runtime_error("Couldn't determine ephemeris time range.");
 
-//    std::cout << std::fixed << start_jd << " - " << end_jd << std::endl;
-//    exit(0);
-
-//    const unsigned JPL_MAX_N_CONSTANTS = 1018;
-//    char nams[JPL_MAX_N_CONSTANTS][6], buff[102];
-//    double vals[JPL_MAX_N_CONSTANTS];
-
-//    void* ephem = jpl_init_ephemeris( "/Users/stevenlovegrove/code/telescope/data/de440/linux_p1550p2650.440", nams, vals);
-//    const double start_jd = jpl_get_double( ephem, JPL_EPHEM_START_JD);
-//    const double end_jd = jpl_get_double( ephem, JPL_EPHEM_END_JD);
-
     const double now_jd = utc_timepoint_to_jd();
     const double now_plus_1y_jd = now_jd - 365.0;
-
 
     pangolin::CreateWindowAndBind("Main",640,480);
     glEnable(GL_DEPTH_TEST);
 
     pangolin::OpenGlRenderState s_cam(
-      pangolin::ProjectionMatrix(640,480,420,420,320,240,0.1,1000),
+      pangolin::ProjectionMatrix(640,480,420,420,320,240,0.01,100),
       pangolin::ModelViewLookAt(-0,0.5,-3, 0,0,0, pangolin::AxisY)
     );
 
@@ -292,6 +329,8 @@ void test_star_map()
         .SetBounds(0.0, 1.0, 0.0, pangolin::Attach::Pix(UI_WIDTH));
 
     pangolin::Var<double> ui_jd("ui.JD", 0.0, 0.0, 360.0);
+    pangolin::Var<double> ui_body_scale("ui.body_scale", 1000.0, 1.0, 1000.0);
+    pangolin::Var<int> ui_center_body("ui.center_body", NAIFID_SUN, NAIFID_MERCURY_BARYCENTER, NAIFID_SUN);
 
     while( !pangolin::ShouldQuit() )
     {
@@ -299,13 +338,12 @@ void test_star_map()
 
       if(d_cam.IsShown()) {
           d_cam.Activate(s_cam);
-          RenderSolarSystem(peph, now_jd, ui_jd);
+          RenderSolarSystem(peph, now_jd, ui_jd, ui_center_body, ui_body_scale);
       }
 
       pangolin::FinishFrame();
     }
 
-//    jpl_close_ephemeris( ephem);
     calceph_close(peph);
 
 }
