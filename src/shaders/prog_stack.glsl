@@ -29,7 +29,7 @@ uniform mat3  u_spline_matrix;
 uniform sampler2D tex;
 
 void main() {
-    vec2 Pa = (v_pos * vec2(0.5,-0.5) + vec2(0.5,0.5)) * u_dim - vec2(0.5);
+    vec2 Pa = (v_pos * vec2(0.5,0.5) + vec2(0.5,0.5)) * u_dim - vec2(0.5);
     vec2 Pb = Project(u_KRbaKinv * Unproject(Pa));
     float rad = length(Pb - u_dim/2.0);
     float v = bspline3(u_spline_interval, u_spline_control_points, u_spline_matrix, rad);

@@ -28,7 +28,7 @@ float sq(float x)
 }
 
 void main() {
-    vec2 p_a = (v_pos * vec2(0.5, 0.5) + vec2(0.5,0.5)) * u_dim - vec2(0.5);
+    vec2 p_a = (v_pos * vec2(0.5, -0.5) + vec2(0.5,0.5)) * u_dim - vec2(0.5);
     vec3 P_b = normalize(u_RbaKinv * Unproject(p_a));
     vec2 lat_lon = vec2(
         atan(P_b.y, P_b.x),

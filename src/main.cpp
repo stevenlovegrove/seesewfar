@@ -31,6 +31,9 @@
 
 using namespace pangolin;
 
+constexpr double EARTH_ROTATION_RAD_PER_SECOND= M_PI / (12.0*60.0*60.0);
+
+
 // TODO:
 // * auto tracking.
 // * Align to star map
@@ -46,7 +49,7 @@ int main( int argc, char** argv )
     if(shader_dir.empty()) throw std::runtime_error("Couldn't find runtime shader dir.");
 
     const std::string data_dir = pangolin::FindPath(argv[0], "/data");
-    const std::string starmap_filename = data_dir + "/starmaps/constellation_figures_8k.jpg";
+    const std::string starmap_filename = data_dir + "/starmaps/starmap_2020_8k_combined.exr";
     const std::string image_glob = data_dir + "/image_sets/set1/DSC*.ARW";
 
     // Find images
@@ -77,7 +80,7 @@ int main( int argc, char** argv )
     const size_t height = to_upload.front().image.h;
     const Eigen::Vector2d dims((double)width, (double)height);
     const unsigned long start_time = to_upload.front().info.timestamp;
-//    const float focal_mm = to_upload.front().info.focal_mm;
+    const float focal_mm = to_upload.front().info.focal_mm;
     const auto pix_fmt = PixelFormatFromString("GRAY16LE");
 
     // load rest in parallel.
@@ -115,6 +118,7 @@ int main( int argc, char** argv )
     view_composite.offset_scale.second = 10.0f;
 
     View view_starmap;
+    view_starmap.SetAspect(aspect);
 
     View container;
     DisplayBase().AddDisplay(container);
@@ -141,9 +145,10 @@ int main( int argc, char** argv )
     Var<int> frame("ui.frame", 0, 0, N-1);
     frame.Meta().gui_changed = true;
 
-    double focal_pix = 3291.0; //pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
-    Eigen::Vector3d axis_angle(1.064e-5, 5.279e-5,-4.417e-5); //(0.0, 0.0, 0.0);
-    double angle_offset = 0.0;
+//    double focal_pix = 3291.0; //pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
+    double focal_pix = pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
+    Eigen::Vector3d axis_angle(1.022e-5, 5.354e-5,-4.814e-5); //(0.0, 0.0, 0.0);
+    double angle_offset = 1.241;
 
     float green_fac = 1.0;
     float red_fac = 1.0;
@@ -265,7 +270,7 @@ int main( int argc, char** argv )
              0.0, 0.0, 1.0;
 
         // we want a rotation which takes the polar axis in camera frame to the z-axis for J2000
-        const Eigen::Vector3d polaraxis_cam = -axis_angle.normalized();
+        const Eigen::Vector3d polaraxis_cam = axis_angle.normalized();
         const Sophus::SO3d R_J2000_Camera = Sophus::SO3d::rotZ(angle_offset) * Sophus::SO3FromNormal(polaraxis_cam).inverse();
 
         const Eigen::Matrix3d RKinv = R_J2000_Camera.matrix() * K_image.inverse();
@@ -287,7 +292,7 @@ int main( int argc, char** argv )
         prog_carree.Unbind();
     };
 
-    const size_t view_scale = 4;
+    const size_t view_scale = 2;
     view_composite.tex = GlTexture(view_scale*width,view_scale*height,GL_RGB32F);
     GlFramebuffer buffer(view_composite.tex);
 
@@ -297,6 +302,8 @@ int main( int argc, char** argv )
 
     while( !pangolin::ShouldQuit() )
     {
+        axis_angle = EARTH_ROTATION_RAD_PER_SECOND * axis_angle.normalized();
+
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         {
