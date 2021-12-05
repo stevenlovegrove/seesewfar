@@ -9,7 +9,8 @@
 #include <pangolin/utils/file_utils.h>
 #include <pangolin/plot/plotter.h>
 
-#include <sophus/so3.hpp>
+#include <sophus/se3.hpp>
+#include <sophus/geometry.hpp>
 
 #include <async++.h>
 
@@ -45,8 +46,7 @@ int main( int argc, char** argv )
     if(shader_dir.empty()) throw std::runtime_error("Couldn't find runtime shader dir.");
 
     const std::string data_dir = pangolin::FindPath(argv[0], "/data");
-    const std::string starmap_filename = data_dir + "/starmaps/starmap_2020_4k.exr";
-//    const std::string starmap_filename = data_dir + "/starmaps/test.jpg";
+    const std::string starmap_filename = data_dir + "/starmaps/constellation_figures_8k.jpg";
     const std::string image_glob = data_dir + "/image_sets/set1/DSC*.ARW";
 
     // Find images
@@ -143,6 +143,8 @@ int main( int argc, char** argv )
 
     double focal_pix = 3291.0; //pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
     Eigen::Vector3d axis_angle(1.064e-5, 5.279e-5,-4.417e-5); //(0.0, 0.0, 0.0);
+    double angle_offset = 0.0;
+
     float green_fac = 1.0;
     float red_fac = 1.0;
     float blue_fac = 1.0;
@@ -158,6 +160,8 @@ int main( int argc, char** argv )
     Var<float>::Attach("ui.red_fac", red_fac, 0.5, 1.0);
     Var<float>::Attach("ui.blue_fac", blue_fac, 0.5, 1.0);
     Var<float>::Attach("ui.gamma", gamma, 0.1, 1.0);
+    Var<double>::Attach("ui.angle_offset", angle_offset, -M_PI, M_PI);
+
 
     Eigen::Vector2f offset_scale(0.0f, 1.0f);
 
@@ -260,8 +264,9 @@ int main( int argc, char** argv )
              0.0, focal_pix, height / 2.0,
              0.0, 0.0, 1.0;
 
-         // TODO set this
-        const Sophus::SO3d R_J2000_Camera = Sophus::SO3d::rotX(M_PI/2.0) * R_vis_gl;
+        // we want a rotation which takes the polar axis in camera frame to the z-axis for J2000
+        const Eigen::Vector3d polaraxis_cam = -axis_angle.normalized();
+        const Sophus::SO3d R_J2000_Camera = Sophus::SO3d::rotZ(angle_offset) * Sophus::SO3FromNormal(polaraxis_cam).inverse();
 
         const Eigen::Matrix3d RKinv = R_J2000_Camera.matrix() * K_image.inverse();
 

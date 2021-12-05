@@ -22,11 +22,6 @@ uniform float u_gamma;
 
 uniform sampler2D tex;
 
-//float atan2(in float y, in float x)
-//{
-//    return (abs(x) > abs(y)) ? atan(y,x) : (M_PI/2.0 - atan(x,y));
-//}
-
 float sq(float x)
 {
     return x*x;
