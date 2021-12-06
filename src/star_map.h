@@ -246,7 +246,8 @@ void RenderSolarSystem(t_calcephbin *peph, double jd0, double jd_offset, int cen
         {NAIFID_NEPTUNE_BARYCENTER,    49500 / AU_IN_KM / 2.0},
         {NAIFID_PLUTO_BARYCENTER,     2376.6 / AU_IN_KM / 2.0},
         {NAIFID_SUN,               1391000.0 / AU_IN_KM / 2.0},
-        {NAIFID_MOON,                 3474.8 / AU_IN_KM / 2.0}
+        {NAIFID_MOON,                 3474.8 / AU_IN_KM / 2.0},
+//        {4660,               100*0.165000432 / AU_IN_KM / 2.0}
     };
 
     for( const auto& obj : objects)
@@ -295,10 +296,13 @@ void test_star_map()
 //        "/Users/stevenlovegrove/Downloads/eph/de-403-masses.tpc",
 //        "/Users/stevenlovegrove/Downloads/eph/moon_pa_de430_1550-2650.bpc",
 //        "/Users/stevenlovegrove/Downloads/eph/lnxp1600p2200.405",
-        "/Users/stevenlovegrove/code/telescope/data/ephemeris/linux_p1550p2650.440"
+        "/Users/stevenlovegrove/code/telescope/data/ephemeris/linux_p1550p2650.440",
+//        "/Users/stevenlovegrove/code/telescope/data/ephemeris/2004660.bsp", // 4660 Nereus
 //          "/Users/stevenlovegrove/Downloads/eph/linux_m13000p17000.441",
 //        "/Users/stevenlovegrove/Downloads/horizons_4660.txt", // doesn't seem to work
     };
+
+
 
     t_calcephbin *peph = calceph_open_array(std::size(files), files);
     if (!peph) throw std::runtime_error("Couldn't open ephemeris file.");

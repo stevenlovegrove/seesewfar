@@ -41,7 +41,6 @@ constexpr double EARTH_ROTATION_RAD_PER_SECOND= M_PI / (12.0*60.0*60.0);
 
 int main( int argc, char** argv )
 {
-//    test();
 //    test_star_map();
 //    return 0;
 
@@ -69,10 +68,10 @@ int main( int argc, char** argv )
         auto channels = LoadImageAndInfo(image_filenames[0]);
         for(auto& c : channels)  to_upload.push(std::move(c));
 
-        // shuffle the rest for less bias incremental sampling
-        std::random_device rd;
-        std::mt19937 g(rd());
-        std::shuffle(image_filenames.begin()+1, image_filenames.end(), g);
+//        // shuffle the rest for less bias incremental sampling
+//        std::random_device rd;
+//        std::mt19937 g(rd());
+//        std::shuffle(image_filenames.begin()+1, image_filenames.end(), g);
     }
 
     const size_t N = image_filenames.size();
@@ -142,10 +141,6 @@ int main( int argc, char** argv )
         pangolin::RegisterKeyPressCallback('1'+i, [i,&container](){ container[i].ToggleShow(); });
     }
 
-    Var<int> frame("ui.frame", 0, 0, N-1);
-    frame.Meta().gui_changed = true;
-
-//    double focal_pix = 3291.0; //pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
     double focal_pix = pixel_focal_length_from_mm(focal_mm, {36.0, 24.0}, {double(width), double(height)} );
     Eigen::Vector3d axis_angle(1.022e-5, 5.354e-5,-4.814e-5); //(0.0, 0.0, 0.0);
     double angle_offset = 1.241;
@@ -156,7 +151,8 @@ int main( int argc, char** argv )
     float gamma = 1.0;
     float vig_scale = 1.0;
 
-
+    Var<int> frame("ui.frame", -1, -1, N-1);
+    frame.Meta().gui_changed = true;
     Var<double>::Attach("ui.f", focal_pix, width / 4.0, width * 4.0 );
     Var<double>::Attach("ui.a1", axis_angle[0], -1e-4, +1e-4);
     Var<double>::Attach("ui.a2", axis_angle[1], -1e-4, +1e-4);
@@ -168,8 +164,6 @@ int main( int argc, char** argv )
     Var<double>::Attach("ui.angle_offset", angle_offset, -M_PI, M_PI);
 
 
-    Eigen::Vector2f offset_scale(0.0f, 1.0f);
-
     constexpr size_t spline_K = 3;
     const double control_point_interval = 400.0;
     const size_t num_control_points = int(hist_bins/control_point_interval) + spline_K;
@@ -179,10 +173,10 @@ int main( int argc, char** argv )
     auto render_warped = [&](const Sophus::SO3d& R_ba, const Eigen::Matrix3d& K, const Eigen::Matrix3d& Kinv, GlTexture& tex, uint8_t bayer_channel) {
         // BGGR
         Eigen::Vector3f colors[] = {
-            {0.0f, 0.0f, blue_fac},
-            {0.0f, green_fac/2.0f, 0.0f},
-            {0.0f, green_fac/2.0f, 0.0f},
             {red_fac, 0.0f, 0.0f},
+            {0.0f, green_fac/2.0f, 0.0f},
+            {0.0f, green_fac/2.0f, 0.0f},
+            {0.0f, 0.0f, blue_fac},
         };
 
         const Eigen::Matrix3d H = K * R_ba.matrix() * Kinv;
@@ -221,7 +215,9 @@ int main( int argc, char** argv )
         } );
 
         textures.push_back(t);
-        to_fuse.push(t);
+        if(frame == -1) {
+            to_fuse.push(t);
+        }
     };
 
     auto render_next_tex = [&]()
@@ -244,26 +240,20 @@ int main( int argc, char** argv )
         Eigen::Matrix3d K_channel;
         const double dx = 0.5*(t->info.bayer_channel % 2);
         const double dy = 0.5*(t->info.bayer_channel / 2);
-        K_channel << focal_pix, 0.0, width / 2.0 + dx,
-             0.0, focal_pix, height / 2.0 + dy,
+
+        // TODO: why does this only work with negatives here? Should be +ive...
+        K_channel << focal_pix, 0.0, width / 2.0 - dx,
+             0.0, focal_pix, height / 2.0 - dy,
              0.0, 0.0, 1.0;
 
-        Eigen::Matrix3d K_channel_inv = K_channel.inverse();
+        Eigen::Matrix3d K_image_inv = K_image.inverse();
 
-        // TODO - I think I have channel and image K matrices wrong way around. Fix
-        render_warped(R_ba, K_image, K_channel_inv, t->tex, t->info.bayer_channel);
+        render_warped(R_ba, K_channel, K_image_inv, t->tex, t->info.bayer_channel);
     };
 
     view_starmap.extern_draw_function = [&](View& v){
         view_starmap.Activate();
         // Use same view as composite
-        const pangolin::XYRangef& xy = view_composite.GetViewToRender();
-        glMatrixMode(GL_PROJECTION);
-        glLoadIdentity();
-//        ProjectionMatrixOrthographic(xy.x.min, xy.x.max, xy.y.max, xy.y.min, -1.0f, 1.0f).Load();
-        glMatrixMode(GL_MODELVIEW);
-        glLoadIdentity();
-
         Eigen::Matrix3d K_image;
         K_image << focal_pix, 0.0, width / 2.0,
              0.0, focal_pix, height / 2.0,
@@ -292,7 +282,7 @@ int main( int argc, char** argv )
         prog_carree.Unbind();
     };
 
-    const size_t view_scale = 2;
+    const size_t view_scale = 1;
     view_composite.tex = GlTexture(view_scale*width,view_scale*height,GL_RGB32F);
     GlFramebuffer buffer(view_composite.tex);
 
@@ -342,7 +332,15 @@ int main( int argc, char** argv )
             buffer.Unbind();
 
             while(!to_fuse.empty()) to_fuse.pop();
-            for(auto& t : textures) to_fuse.push(t);
+
+            if(frame == -1) {
+                for(auto& t : textures) to_fuse.push(t);
+            }else if( 4*frame+3 < textures.size() ) {
+                for(int c=0; c < 4; ++c) {
+                    to_fuse.push(textures[4*frame+c]);
+                }
+            }
+
             num_fused = 0;
         }
 
