@@ -1,8 +1,9 @@
 #pragma once
 
 #include <libraw/libraw.h>
-#include <pangolin/image/managed_image.h>
 #include <pangolin/gl/gl.h>
+#include <pangolin/image/managed_image.h>
+#include <pangolin/image/shared_image.h>
 
 
 struct ImageInfo
@@ -15,7 +16,7 @@ struct ImageInfo
 struct ChannelAndInfo
 {
     ImageInfo info;
-    pangolin::ManagedImage<uint16_t> image;
+    pangolin::SharedImage<uint16_t> image;
 };
 
 struct TextureAndInfo
@@ -48,7 +49,7 @@ std::array<ChannelAndInfo,4> LoadImageAndInfo(const std::string& filename)
         ret[c].info.focal_mm = raw->imgdata.other.focal_len;
         ret[c].info.bayer_channel = c;
         auto& img_out = ret[c].image;
-        img_out.Reinitialise(S.width / 2, S.height / 2);
+        img_out = pangolin::SharedImage<uint16_t>(S.width / 2, S.height / 2);
         for(unsigned y=0; y < img_out.h; ++y) {
             uint16_t* outp = img_out.RowPtr(y);
             uint16_t* endp = img_out.RowPtr(y) + img_out.w;

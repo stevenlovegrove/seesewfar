@@ -28,11 +28,11 @@
 #include "bspline.h"
 #include "star_map.h"
 #include "coord_convention.h"
+#include "peaks.h"
 
 using namespace pangolin;
 
 constexpr double EARTH_ROTATION_RAD_PER_SECOND= M_PI / (12.0*60.0*60.0);
-
 
 // TODO:
 // * auto tracking.
@@ -84,19 +84,37 @@ int main( int argc, char** argv )
 
     // load rest in parallel.
     async::cancellation_token cancel_point;
-    std::vector<async::task<void>> loading_tasks;
+    std::deque<async::task<void>> loading_tasks;
     const size_t hist_bins = 1000;
 
     PolarHistogram histogram[4] = { {hist_bins}, {hist_bins}, {hist_bins}, {hist_bins} };
+
+    std::vector<std::vector<Peak>> frame_features(N);
+
+    const double min_confidence = 2.0; //("ui.min_conf", 1.0, 0.0, 10.0);
 
     for(size_t i=1; i < image_filenames.size(); ++i) {
         loading_tasks.push_back(async::spawn([&,i](){
             async::interruption_point(cancel_point);
             auto channels = LoadImageAndInfo(image_filenames[i]);
-            for(int c=0; c < 4; ++c) {
-                histogram[c] += ComputePolarHistogram(channels[c].image, dims.cast<float>()/2.0f, hist_bins, 100000);
-            }
-            for(auto& c : channels)  to_upload.push(std::move(c));
+            for(auto& c : channels)  to_upload.push(c);
+
+            // Create new tasks for polar histograms (channels by value for shared_ptrs)
+            loading_tasks.push_back(async::spawn([&,channels](){
+                for(int c=0; c < 4; ++c) {
+                    async::interruption_point(cancel_point);
+                    histogram[c] += ComputePolarHistogram(channels[c].image, dims.cast<float>()/2.0f, hist_bins, 100000);
+                }
+            }));
+
+            // Create new tasks for detection (channels by value for shared_ptrs)
+            loading_tasks.push_back(async::spawn([&,channels](){
+                async::interruption_point(cancel_point);
+                std::vector<Peak> peak_vec;
+                peak_vec.reserve(1000);
+                DetectPeaks(peak_vec, channels[0].image, min_confidence);
+                frame_features[i] = peak_vec;
+            }));
         }));
     }
 
@@ -162,7 +180,6 @@ int main( int argc, char** argv )
     Var<float>::Attach("ui.blue_fac", blue_fac, 0.5, 1.0);
     Var<float>::Attach("ui.gamma", gamma, 0.1, 1.0);
     Var<double>::Attach("ui.angle_offset", angle_offset, -M_PI, M_PI);
-
 
     constexpr size_t spline_K = 3;
     const double control_point_interval = 400.0;
@@ -282,7 +299,41 @@ int main( int argc, char** argv )
         prog_carree.Unbind();
     };
 
-    const size_t view_scale = 1;
+    auto adjust_vignette = [&](){
+        Eigen::Matrix<float,8,Eigen::Dynamic> data_to_plot(8,hist_bins);
+
+        for(size_t c=0; c < 4; ++c) {
+            if( !(histogram[c].num.array() >  0).all() ) {
+                std::cerr << "histogram not adequately populated yet." << std::endl;
+                return;
+            }
+            data_to_plot.row(c) = histogram[c].sum / histogram[c].num.cast<float>();
+        }
+
+        // fit spline
+        const Eigen::Matrix<double,1,Eigen::Dynamic> rad = Eigen::VectorXd::LinSpaced(hist_bins, 0.0, double(hist_bins));
+
+        control_points = fit_cardinal_basis_spline<double,spline_K,double>(
+            num_control_points, control_point_interval, rad, data_to_plot.topRows<4>().cast<double>()
+        );
+        const Eigen::MatrixXd samples = eval_cardinal_basis_spline<double,spline_K,double>(
+            control_point_interval, control_points, rad
+        );
+        data_to_plot.bottomRows<4>() = samples.cast<float>();
+
+        log.Clear();
+        log.Log(data_to_plot.rows(), data_to_plot.data(), data_to_plot.cols());
+    };
+
+    view_composite.extern_draw_function = [&](pangolin::View&){
+        if( frame >= 0 && frame_features[frame].size() > 0) {
+            const auto& fs = frame_features[frame];
+            glPointSize(2*view_composite.GetViewScale() );
+            pangolin::glDrawVertices<float>(fs.size(), &fs[0].pos[0], GL_POINTS, 2, sizeof(Peak) );
+        }
+    };
+
+    const size_t view_scale = 4;
     view_composite.tex = GlTexture(view_scale*width,view_scale*height,GL_RGB32F);
     GlFramebuffer buffer(view_composite.tex);
 
@@ -290,34 +341,13 @@ int main( int argc, char** argv )
 
     size_t num_fused = 0;
 
+    pangolin::Var<std::function<void()>> do_vignette("ui.do_vignette", adjust_vignette);
+
     while( !pangolin::ShouldQuit() )
     {
         axis_angle = EARTH_ROTATION_RAD_PER_SECOND * axis_angle.normalized();
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        {
-            Eigen::Matrix<float,8,Eigen::Dynamic> data_to_plot(8,hist_bins);
-
-            for(size_t c=0; c < 4; ++c) {
-                data_to_plot.row(c) = histogram[c].sum / histogram[c].num.cast<float>();
-            }
-
-            // fit spline
-            const Eigen::Matrix<double,1,Eigen::Dynamic> rad = Eigen::VectorXd::LinSpaced(hist_bins, 0.0, double(hist_bins));
-
-            control_points = fit_cardinal_basis_spline<double,spline_K,double>(
-                num_control_points, control_point_interval, rad, data_to_plot.topRows<4>().cast<double>()
-            );
-            const Eigen::MatrixXd samples = eval_cardinal_basis_spline<double,spline_K,double>(
-                control_point_interval, control_points, rad
-            );
-            data_to_plot.bottomRows<4>() = samples.cast<float>();
-
-            log.Clear();
-            log.Log(data_to_plot.rows(), data_to_plot.data(), data_to_plot.cols());
-
-        }
 
         for(int i=0; i < 4; ++i) upload_next_texture();
 
