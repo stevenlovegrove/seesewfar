@@ -30,8 +30,8 @@ PolarHistogram ComputePolarHistogram(const pangolin::Image<uint16_t>& image, con
     PolarHistogram hist(num_bins);
 
     static std::default_random_engine gen;
-    std::uniform_int_distribution<size_t> dist_w(0, image.w);
-    std::uniform_int_distribution<size_t> dist_h(0, image.h);
+    std::uniform_int_distribution<size_t> dist_w(0, image.w - 1);
+    std::uniform_int_distribution<size_t> dist_h(0, image.h - 1);
 
     for(size_t i=0; i < num_samples; ++i) {
         const Eigen::Vector2i p{dist_w(gen), dist_h(gen)};
